@@ -21,7 +21,7 @@ function App() {
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center">
               <Activity className="h-8 w-8 text-blue-600" />
-              <h1 className="ml-2 text-xl font-semibold">DevOps Monitor</h1>
+              <h1 className="ml-2 text-xl font-semibold">DevOps AI Sentinel </h1>
             </div>
             
             <div className="flex items-center gap-6">

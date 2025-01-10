@@ -10,19 +10,18 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "lucide-react": "^0.344.0",
-    "recharts": "^2.12.2",
-    "date-fns": "^3.3.1",
-    "axios": "^1.6.7",
-    "@azure/identity": "^4.0.1",
     "@aws-sdk/client-cloudwatch": "^3.525.0",
+    "@azure/identity": "^4.0.1",
     "@google-cloud/monitoring": "^4.1.0",
     "@slack/web-api": "^7.0.2",
-    "ml-isolation-forest": "^2.0.0",
-    "ml-dbscan": "^1.0.0",
-    "@tensorflow/tfjs": "^4.17.0"
+    "@tensorflow/tfjs": "^4.17.0",
+    "axios": "^1.6.7",
+    "date-fns": "^3.3.1",
+    "devops-monitor": "file:",
+    "lucide-react": "^0.344.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "recharts": "^2.12.2"
   },
   "devDependencies": {
     "@types/node": "^20.11.24",

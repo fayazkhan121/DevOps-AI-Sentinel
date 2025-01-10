@@ -53,6 +53,38 @@ By leveraging AI and machine learning, DevOps AI Sentinel goes beyond traditiona
 ### Backend:
 - Node.js: Optional for specific integrations like webhooks or real-time event processing.
 
+# Instructions to Run the Project
+### Clone the Repository
+- Clone the project repository to your local machine using the following command:
+### git clone https://github.com/fayazkhan121/DevOps-AI-Sentinel.git
+
+
+# Navigate to the Project Directory
+### Move into the project directory:
+cd DevOps-AI-Sentinel
+
+# Install Dependencies
+### Install all the required dependencies:
+npm install
+
+# Run the Development Server
+### Start the development server:
+npm run dev
+
+# Access the Project
+- Open your web browser and navigate to the URL displayed in the terminal (e.g
+
+http://localhost:5173/
+
+# Prerequisites
+- Ensure the following are installed and set up on your machine:
+
+### Node.js: Download and install from Node.js official website.
+### npm: Comes with Node.js. Verify installation using npm -v.
+
   # Use Case 
   - A DevOps team integrates DevOps AI Sentinel into their Jenkins and Kubernetes-based pipeline. The tool identifies an anomaly in resource utilization during the deployment phase and predicts a potential node failure due to high memory consumption. The team receives a Slack alert with detailed metrics and a recommended resolution (e.g., increasing memory limits for pods). Using the tool’s dashboard, they visualize the anomaly, apply the fix, and prevent downtime.
+
+
+
 

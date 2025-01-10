@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Activity, Server, Cpu, Database, Bell, Settings, Users, Search } from 'lucide-react';
 import { MetricsCard } from './components/MetricsCard';
 import { AlertsList } from './components/AlertsList';
@@ -7,9 +7,7 @@ import { AnomalyDetectionPanel } from './components/AnomalyDetection';
 import { ResourceMonitoring } from './components/ResourceMonitoring';
 import { KubernetesOverview } from './components/KubernetesOverview';
 import { ServiceHealthCheck } from './components/ServiceHealthCheck';
-import type { Alert, PipelineStatus, AnomalyDetection, ResourceMetrics, KubernetesMetrics, ServiceHealth } from './types';
-
-// Mock data remains the same as before...
+import { mockAlerts, mockPipelines, mockAnomalies, mockResources, mockKubernetes, mockServices } from './types/mock';
 
 function App() {
   const [searchQuery, setSearchQuery] = useState('');
@@ -54,7 +52,9 @@ function App() {
                 className="relative p-2 text-gray-400 hover:text-gray-500"
               >
                 <Bell size={20} />
-                <span className="absolute top-0 right-0 block h-2 w-2 rounded-full bg-red-400 ring-2 ring-white" />
+                {mockAlerts.length > 0 && (
+                  <span className="absolute top-0 right-0 block h-2 w-2 rounded-full bg-red-400 ring-2 ring-white" />
+                )}
               </button>
 
               <button className="p-2 text-gray-400 hover:text-gray-500">
@@ -70,7 +70,54 @@ function App() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Rest of the components remain the same... */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+          <MetricsCard
+            title="System Health"
+            value="98.5%"
+            trend={2.1}
+            trendLabel="vs last week"
+            icon={<Server className="h-6 w-6 text-blue-600" />}
+            prediction={{ value: "99.1%", confidence: 85 }}
+          />
+          <MetricsCard
+            title="Resource Usage"
+            value="72%"
+            trend={-5.4}
+            trendLabel="vs yesterday"
+            icon={<Cpu className="h-6 w-6 text-blue-600" />}
+            prediction={{ value: "78%", confidence: 90 }}
+          />
+          <MetricsCard
+            title="Active Services"
+            value="45/48"
+            trend={0}
+            trendLabel="all services operational"
+            icon={<Activity className="h-6 w-6 text-blue-600" />}
+          />
+          <MetricsCard
+            title="Database Load"
+            value="65%"
+            trend={12.3}
+            trendLabel="increased load"
+            icon={<Database className="h-6 w-6 text-blue-600" />}
+            prediction={{ value: "70%", confidence: 75 }}
+          />
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          <AlertsList alerts={mockAlerts} />
+          <PipelinesList pipelines={mockPipelines} />
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          <AnomalyDetectionPanel anomalies={mockAnomalies} />
+          <ResourceMonitoring resources={mockResources} />
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <KubernetesOverview metrics={mockKubernetes} />
+          <ServiceHealthCheck services={mockServices} />
+        </div>
       </main>
 
       {showNotifications && (

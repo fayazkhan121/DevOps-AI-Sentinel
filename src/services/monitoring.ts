@@ -1,13 +1,22 @@
 import axios from 'axios';
 import type { ResourceMetrics, KubernetesMetrics } from '../types';
+import { CloudWatchClient, GetMetricDataCommand } from "@aws-sdk/client-cloudwatch";
+import { DefaultAzureCredential } from "@azure/identity";
+import { monitoring_v3 } from '@google-cloud/monitoring';
 
-class MonitoringService {
+export class MonitoringService {
   private baseUrl: string;
   private apiKey: string;
+  private cloudWatchClient: CloudWatchClient;
+  private gcpMonitoringClient: monitoring_v3.MetricServiceClient;
 
   constructor() {
     this.baseUrl = process.env.VITE_API_URL || '';
     this.apiKey = process.env.VITE_API_KEY || '';
+    
+    // Initialize cloud provider clients
+    this.cloudWatchClient = new CloudWatchClient({ region: process.env.AWS_REGION });
+    this.gcpMonitoringClient = new monitoring_v3.MetricServiceClient();
   }
 
   // Resource Monitoring
@@ -17,6 +26,52 @@ class MonitoringService {
       headers: { 'Authorization': `Bearer ${this.apiKey}` }
     });
     return response.data;
+  }
+
+  // AWS CloudWatch Metrics
+  async getAwsMetrics(metricNames: string[], namespace: string, period: number) {
+    const command = new GetMetricDataCommand({
+      MetricDataQueries: metricNames.map((metricName, index) => ({
+        Id: `m${index}`,
+        MetricStat: {
+          Metric: {
+            MetricName: metricName,
+            Namespace: namespace
+          },
+          Period: period,
+          Stat: 'Average'
+        }
+      })),
+      StartTime: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      EndTime: new Date()
+    });
+
+    return await this.cloudWatchClient.send(command);
+  }
+
+  // Azure Monitoring
+  async getAzureMetrics(resourceId: string, metricNames: string[]) {
+    const credential = new DefaultAzureCredential();
+    // Azure monitoring implementation
+  }
+
+  // Google Cloud Monitoring
+  async getGcpMetrics(projectId: string, metricType: string) {
+    const request = {
+      name: `projects/${projectId}`,
+      filter: `metric.type="${metricType}"`,
+      interval: {
+        startTime: {
+          seconds: Date.now() / 1000 - 24 * 60 * 60
+        },
+        endTime: {
+          seconds: Date.now() / 1000
+        }
+      }
+    };
+
+    const [timeSeries] = await this.gcpMonitoringClient.listTimeSeries(request);
+    return timeSeries;
   }
 
   // Kubernetes Monitoring

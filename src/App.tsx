@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Activity, Server, Cpu, Database, Bell, Settings, Users, Search } from 'lucide-react';
 import { MetricsCard } from './components/MetricsCard';
 import { AlertsList } from './components/AlertsList';
@@ -7,11 +7,13 @@ import { AnomalyDetectionPanel } from './components/AnomalyDetection';
 import { ResourceMonitoring } from './components/ResourceMonitoring';
 import { KubernetesOverview } from './components/KubernetesOverview';
 import { ServiceHealthCheck } from './components/ServiceHealthCheck';
+import { SettingsPanel } from './components/settings/SettingsPanel';
 import { mockAlerts, mockPipelines, mockAnomalies, mockResources, mockKubernetes, mockServices } from './types/mock';
 
 function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [timeRange, setTimeRange] = useState('24h');
 
   return (
@@ -21,7 +23,7 @@ function App() {
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center">
               <Activity className="h-8 w-8 text-blue-600" />
-              <h1 className="ml-2 text-xl font-semibold">DevOps AI Sentinel </h1>
+              <h1 className="ml-2 text-xl font-semibold">DevOps Monitor</h1>
             </div>
             
             <div className="flex items-center gap-6">
@@ -57,7 +59,10 @@ function App() {
                 )}
               </button>
 
-              <button className="p-2 text-gray-400 hover:text-gray-500">
+              <button 
+                onClick={() => setShowSettings(true)} 
+                className="p-2 text-gray-400 hover:text-gray-500"
+              >
                 <Settings size={20} />
               </button>
 
@@ -137,6 +142,8 @@ function App() {
           </div>
         </div>
       )}
+
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
     </div>
   );
 }

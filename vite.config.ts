@@ -14,7 +14,13 @@ export default defineConfig({
     port: 5173
   },
   optimizeDeps: {
-    exclude: ['@tensorflow/tfjs']
+    exclude: ['@tensorflow/tfjs'],
+    esbuildOptions: {
+      define: {
+        global: 'globalThis',
+        module: 'globalThis'
+      }
+    }
   },
   build: {
     sourcemap: true,
@@ -26,5 +32,10 @@ export default defineConfig({
         }
       }
     }
+  },
+  define: {
+    'global': 'globalThis',
+    'module': 'globalThis',
+    'process.env': {}
   }
 });

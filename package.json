@@ -13,7 +13,6 @@
     "@aws-sdk/client-cloudwatch": "^3.525.0",
     "@azure/identity": "^4.0.1",
     "@google-cloud/monitoring": "^4.1.0",
-    "@slack/web-api": "^7.0.2",
     "@tensorflow/tfjs": "^4.17.0",
     "axios": "^1.6.7",
     "date-fns": "^3.3.1",

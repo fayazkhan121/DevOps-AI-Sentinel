@@ -10,6 +10,7 @@ import { ServiceHealthCheck } from './components/ServiceHealthCheck';
 import { SettingsPanel } from './components/settings/SettingsPanel';
 import { useSettings } from './hooks/useSettings';
 import { mockAlerts, mockPipelines, mockAnomalies, mockResources, mockKubernetes, mockServices } from './types/mock';
+import * as tf from '@tensorflow/tfjs';
 
 function App() {
   const [searchQuery, setSearchQuery] = useState('');
@@ -17,6 +18,21 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [timeRange, setTimeRange] = useState('24h');
   const { settings, updateSettings } = useSettings();
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Initialize TensorFlow.js
+  useEffect(() => {
+    const initTF = async () => {
+      try {
+        await tf.ready();
+        setIsLoading(false);
+      } catch (error) {
+        console.error('Failed to initialize TensorFlow.js:', error);
+        setIsLoading(false);
+      }
+    };
+    initTF();
+  }, []);
 
   // Apply theme on mount and theme change
   useEffect(() => {
@@ -36,6 +52,17 @@ function App() {
       service.name.toLowerCase().includes(searchQuery.toLowerCase())
     )
   };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <Activity className="h-12 w-12 text-blue-600 animate-spin mx-auto" />
+          <h2 className="mt-4 text-xl font-semibold text-gray-900">Loading DevOps Monitor...</h2>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`min-h-screen ${settings.general.theme === 'dark' ? 'dark bg-gray-900' : 'bg-gray-50'}`}>

@@ -72,7 +72,7 @@ function App() {
             <div className="flex items-center">
               <Activity className="h-8 w-8 text-blue-600" />
               <h1 className={`ml-2 text-xl font-semibold ${settings.general.theme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                DevOps Monitor
+              DevOps AI Sentinel
               </h1>
             </div>
             

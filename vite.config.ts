@@ -13,16 +13,23 @@ export default defineConfig({
     host: true,
     port: 5173
   },
+  define: {
+    'process.env': {}, // Define process.env as an empty object to avoid errors
+  },
   optimizeDeps: {
-    exclude: ['@tensorflow/tfjs']
+    include: ['@tensorflow/tfjs'],
+    esbuildOptions: {
+      target: 'es2020'
+    }
   },
   build: {
     sourcemap: true,
+    target: 'es2020',
     rollupOptions: {
       output: {
         manualChunks: {
           vendor: ['react', 'react-dom', 'recharts'],
-          monitoring: ['@aws-sdk/client-cloudwatch', '@azure/identity', '@google-cloud/monitoring']
+          tensorflow: ['@tensorflow/tfjs']
         }
       }
     }

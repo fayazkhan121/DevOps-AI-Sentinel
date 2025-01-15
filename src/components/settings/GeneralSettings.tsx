@@ -9,6 +9,16 @@ interface GeneralSettingsProps {
 export function GeneralSettings({ settings, onChange }: GeneralSettingsProps) {
   const timezones = Intl.supportedValuesOf('timeZone');
 
+  const updateGeneralSetting = (key: string, value: any) => {
+    onChange({
+      ...settings,
+      general: {
+        ...settings.general,
+        [key]: value
+      }
+    });
+  };
+
   return (
     <div className="space-y-6">
       <h3 className="text-lg font-medium">General Settings</h3>
@@ -20,10 +30,7 @@ export function GeneralSettings({ settings, onChange }: GeneralSettingsProps) {
           </label>
           <select
             value={settings.general.theme}
-            onChange={e => onChange({
-              ...settings,
-              general: { ...settings.general, theme: e.target.value as 'light' | 'dark' }
-            })}
+            onChange={e => updateGeneralSetting('theme', e.target.value)}
             className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
           >
             <option value="light">Light</option>
@@ -40,10 +47,7 @@ export function GeneralSettings({ settings, onChange }: GeneralSettingsProps) {
             min="5"
             max="300"
             value={settings.general.refreshInterval}
-            onChange={e => onChange({
-              ...settings,
-              general: { ...settings.general, refreshInterval: parseInt(e.target.value) }
-            })}
+            onChange={e => updateGeneralSetting('refreshInterval', parseInt(e.target.value))}
             className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
           />
         </div>
@@ -54,10 +58,7 @@ export function GeneralSettings({ settings, onChange }: GeneralSettingsProps) {
           </label>
           <select
             value={settings.general.timezone}
-            onChange={e => onChange({
-              ...settings,
-              general: { ...settings.general, timezone: e.target.value }
-            })}
+            onChange={e => updateGeneralSetting('timezone', e.target.value)}
             className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
           >
             {timezones.map(timezone => (
@@ -73,11 +74,8 @@ export function GeneralSettings({ settings, onChange }: GeneralSettingsProps) {
             Data Retention Period
           </label>
           <select
-            value={settings.general.retentionPeriod || '30'}
-            onChange={e => onChange({
-              ...settings,
-              general: { ...settings.general, retentionPeriod: e.target.value }
-            })}
+            value={settings.general.retentionPeriod}
+            onChange={e => updateGeneralSetting('retentionPeriod', e.target.value)}
             className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
           >
             <option value="7">7 days</option>
@@ -86,6 +84,48 @@ export function GeneralSettings({ settings, onChange }: GeneralSettingsProps) {
             <option value="180">180 days</option>
             <option value="365">1 year</option>
           </select>
+        </div>
+
+        <div>
+          <h4 className="text-sm font-medium text-gray-700 mb-2">Notifications</h4>
+          <div className="space-y-2">
+            <label className="flex items-center">
+              <input
+                type="checkbox"
+                checked={settings.general.notifications.email}
+                onChange={e => updateGeneralSetting('notifications', {
+                  ...settings.general.notifications,
+                  email: e.target.checked
+                })}
+                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              />
+              <span className="ml-2 text-sm text-gray-600">Email Notifications</span>
+            </label>
+            <label className="flex items-center">
+              <input
+                type="checkbox"
+                checked={settings.general.notifications.slack}
+                onChange={e => updateGeneralSetting('notifications', {
+                  ...settings.general.notifications,
+                  slack: e.target.checked
+                })}
+                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              />
+              <span className="ml-2 text-sm text-gray-600">Slack Notifications</span>
+            </label>
+            <label className="flex items-center">
+              <input
+                type="checkbox"
+                checked={settings.general.notifications.inApp}
+                onChange={e => updateGeneralSetting('notifications', {
+                  ...settings.general.notifications,
+                  inApp: e.target.checked
+                })}
+                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              />
+              <span className="ml-2 text-sm text-gray-600">In-App Notifications</span>
+            </label>
+          </div>
         </div>
       </div>
     </div>

@@ -1,6 +1,6 @@
 # DevOps-AI-Sentinel
-![screencapture-localhost-5173-2025-01-15-11_07_05](https://github.com/user-attachments/assets/3f8cc0ca-f2f5-435b-8e11-5c3217afccb4)
 
+![screencapture-localhost-5173-2025-01-15-11_07_05](https://github.com/user-attachments/assets/2248be3c-bb70-4ab8-b7af-7f719a772480)
 
 # Project Description
 DevOps AI Sentinel is an advanced open-source monitoring and analytics platform designed to streamline DevOps workflows by providing real-time monitoring, predictive analytics, anomaly detection, and automated resolution suggestions. It integrates seamlessly with popular DevOps tools like Kubernetes, Docker, Jenkins, and Azure DevOps, empowering teams to proactively identify issues, minimize downtime, and optimize system performance.

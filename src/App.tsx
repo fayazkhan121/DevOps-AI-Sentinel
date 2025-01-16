@@ -11,14 +11,16 @@ import { SettingsPanel } from './components/settings/SettingsPanel';
 import { useSettings } from './hooks/useSettings';
 import { mockAlerts, mockPipelines, mockAnomalies, mockResources, mockKubernetes, mockServices } from './types/mock';
 import * as tf from '@tensorflow/tfjs';
+import { ProfileMenu } from './components/ProfileMenu';
 
 function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showNotifications, setShowNotifications] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [timeRange, setTimeRange] = useState('24h');
-  const { settings, updateSettings } = useSettings();
+  const { settings, updateSettings, saveSettings } = useSettings();
   const [isLoading, setIsLoading] = useState(true);
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
 
   // Initialize TensorFlow.js
   useEffect(() => {
@@ -52,6 +54,46 @@ function App() {
       service.name.toLowerCase().includes(searchQuery.toLowerCase())
     )
   };
+
+  // Add handler for settings button click
+  const handleSettingsClick = () => {
+    setShowSettings(true);
+  };
+
+  // Add handler for settings close
+  const handleSettingsClose = async () => {
+    try {
+      await saveSettings();
+      setShowSettings(false);
+    } catch (error) {
+      console.error('Failed to save settings:', error);
+    }
+  };
+
+  // Add handler for profile menu
+  const handleProfileClick = () => {
+    setShowProfileMenu(!showProfileMenu);
+  };
+
+  // Add handler for logout
+  const handleLogout = () => {
+    // Add your logout logic here
+    console.log('Logging out...');
+  };
+
+  // Add click outside handler
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (showProfileMenu && !(event.target as Element).closest('.profile-menu')) {
+        setShowProfileMenu(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showProfileMenu]);
 
   if (isLoading) {
     return (
@@ -118,15 +160,38 @@ function App() {
               </button>
 
               <button 
-                onClick={() => setShowSettings(true)} 
-                className={`p-2 ${settings.general.theme === 'dark' ? 'text-gray-300 hover:text-gray-100' : 'text-gray-400 hover:text-gray-500'}`}
+                onClick={handleSettingsClick}
+                className={`p-2 rounded-full hover:bg-gray-100 ${
+                  settings.general.theme === 'dark' 
+                    ? 'text-gray-300 hover:text-gray-100 hover:bg-gray-700' 
+                    : 'text-gray-400 hover:text-gray-500'
+                }`}
+                aria-label="Settings"
               >
                 <Settings size={20} />
               </button>
 
-              <button className={`p-2 ${settings.general.theme === 'dark' ? 'text-gray-300 hover:text-gray-100' : 'text-gray-400 hover:text-gray-500'}`}>
-                <Users size={20} />
-              </button>
+              <div className="relative profile-menu">
+                <button
+                  onClick={handleProfileClick}
+                  className={`p-2 rounded-full hover:bg-gray-100 ${
+                    settings.general.theme === 'dark' 
+                      ? 'text-gray-300 hover:text-gray-100 hover:bg-gray-700' 
+                      : 'text-gray-400 hover:text-gray-500'
+                  }`}
+                  aria-label="User profile"
+                >
+                  <Users size={20} />
+                </button>
+
+                <ProfileMenu
+                  isOpen={showProfileMenu}
+                  onClose={() => setShowProfileMenu(false)}
+                  settings={settings}
+                  onUpdateSettings={updateSettings}
+                  onLogout={handleLogout}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -218,7 +283,10 @@ function App() {
 
       {showSettings && (
         <SettingsPanel 
-          onClose={() => setShowSettings(false)} 
+          onClose={handleSettingsClose}
+          settings={settings}
+          onSave={saveSettings}
+          onUpdate={updateSettings}
         />
       )}
     </div>

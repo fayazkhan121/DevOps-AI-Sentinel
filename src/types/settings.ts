@@ -4,7 +4,19 @@ export interface Integration {
   id: string;
   type: string;
   name: string;
-  config: Record<string, any>;
+  config: {
+    // Common fields
+    [key: string]: any;
+    
+    // Monitoring specific fields
+    monitoring?: {
+      prometheus?: boolean;
+      grafana?: boolean;
+      alertManager?: boolean;
+      retention?: string;
+      scrapeInterval?: string;
+    };
+  };
   status: 'connected' | 'disconnected' | 'error';
   lastSync?: string;
   error?: string;

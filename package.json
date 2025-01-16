@@ -16,6 +16,7 @@
     "@tensorflow/tfjs": "^4.17.0",
     "axios": "^1.6.7",
     "date-fns": "^3.3.1",
+    "devops-monitor": "file:",
     "lucide-react": "^0.344.0",
     "ml-distance-euclidean": "^2.0.0",
     "ml-kmeans": "^6.0.0",

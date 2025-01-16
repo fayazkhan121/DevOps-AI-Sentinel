@@ -79,6 +79,8 @@ function App() {
   const handleLogout = () => {
     // Add your logout logic here
     console.log('Logging out...');
+    // Redirect to login page or clear session
+    setShowProfileMenu(false);
   };
 
   // Add click outside handler
@@ -171,7 +173,7 @@ function App() {
                 <Settings size={20} />
               </button>
 
-              <div className="relative profile-menu">
+              <div className="relative">
                 <button
                   onClick={handleProfileClick}
                   className={`p-2 rounded-full hover:bg-gray-100 ${
@@ -179,18 +181,19 @@ function App() {
                       ? 'text-gray-300 hover:text-gray-100 hover:bg-gray-700' 
                       : 'text-gray-400 hover:text-gray-500'
                   }`}
-                  aria-label="User profile"
                 >
                   <Users size={20} />
                 </button>
 
-                <ProfileMenu
-                  isOpen={showProfileMenu}
-                  onClose={() => setShowProfileMenu(false)}
-                  settings={settings}
-                  onUpdateSettings={updateSettings}
-                  onLogout={handleLogout}
-                />
+                {showProfileMenu && (
+                  <ProfileMenu
+                    isOpen={showProfileMenu}
+                    onClose={() => setShowProfileMenu(false)}
+                    settings={settings}
+                    onUpdateSettings={updateSettings}
+                    onLogout={handleLogout}
+                  />
+                )}
               </div>
             </div>
           </div>

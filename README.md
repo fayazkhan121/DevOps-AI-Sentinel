@@ -2,7 +2,8 @@
 
 ## Project info
 
-**URL**: https://lovable.dev/projects/a77500cf-c83b-4a22-98a9-369fa1fb6fa5
+![screencapture-localhost-8080-2025-01-31-15_50_54](https://github.com/user-attachments/assets/9ca820de-a28b-4444-b6d2-31721275e87f)
+
 
 ## How can I edit this code?
 

@@ -1,131 +1,159 @@
-import React from 'react';
-import type { Settings } from '../../types/settings';
+import { useEffect, useState } from "react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ThemeToggle } from "./ThemeToggle";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { saveSettings, getSettings } from "@/services/localDb";
+import { useToast } from "@/components/ui/use-toast";
 
-interface GeneralSettingsProps {
-  settings: Settings;
-  onChange: (settings: Settings) => void;
-}
+export function GeneralSettings() {
+  const [timeZone, setTimeZone] = useState("UTC");
+  const [refreshInterval, setRefreshInterval] = useState("30");
+  const [retentionPeriod, setRetentionPeriod] = useState("30");
+  const [isLoading, setIsLoading] = useState(true);
+  const { toast } = useToast();
 
-export function GeneralSettings({ settings, onChange }: GeneralSettingsProps) {
-  const timezones = Intl.supportedValuesOf('timeZone');
-
-  const updateGeneralSetting = (key: string, value: any) => {
-    onChange({
-      ...settings,
-      general: {
-        ...settings.general,
-        [key]: value
+  useEffect(() => {
+    const loadSettings = async () => {
+      try {
+        setIsLoading(true);
+        const settings = await getSettings('general');
+        if (settings) {
+          setTimeZone(settings.timeZone);
+          setRefreshInterval(settings.refreshInterval);
+          setRetentionPeriod(settings.retentionPeriod);
+        }
+      } catch (error) {
+        console.error('Failed to load settings:', error);
+        toast({
+          title: "Error loading settings",
+          description: "Failed to load your settings. Please try again.",
+          variant: "destructive",
+        });
+      } finally {
+        setIsLoading(false);
       }
-    });
+    };
+    loadSettings();
+  }, [toast]);
+
+  const handleSettingChange = async (key: string, value: string) => {
+    try {
+      const currentSettings = await getSettings('general') || {};
+      const newSettings = { ...currentSettings, [key]: value };
+      await saveSettings('general', newSettings);
+      
+      toast({
+        title: "Settings saved",
+        description: "Your settings have been saved successfully.",
+      });
+
+      switch(key) {
+        case 'timeZone':
+          setTimeZone(value);
+          break;
+        case 'refreshInterval':
+          setRefreshInterval(value);
+          break;
+        case 'retentionPeriod':
+          setRetentionPeriod(value);
+          break;
+      }
+    } catch (error) {
+      console.error('Failed to save settings:', error);
+      toast({
+        title: "Error saving settings",
+        description: "Failed to save your settings. Please try again.",
+        variant: "destructive",
+      });
+    }
   };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-48">
+        <p className="text-muted-foreground">Loading settings...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
-      <h3 className="text-lg font-medium">General Settings</h3>
+      <div className="space-y-2">
+        <h3 className="text-lg font-medium">General Settings</h3>
+        <p className="text-sm text-muted-foreground">
+          Configure your general application settings
+        </p>
+      </div>
       
       <div className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Theme
-          </label>
-          <select
-            value={settings.general.theme}
-            onChange={e => updateGeneralSetting('theme', e.target.value)}
-            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+        <ThemeToggle />
+        
+        <div className="space-y-2">
+          <Label>Time Zone</Label>
+          <Select 
+            value={timeZone} 
+            onValueChange={(value) => handleSettingChange('timeZone', value)}
           >
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
+            <SelectTrigger>
+              <SelectValue placeholder="Select timezone" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="UTC">UTC</SelectItem>
+              <SelectItem value="EST">Eastern Time</SelectItem>
+              <SelectItem value="CST">Central Time</SelectItem>
+              <SelectItem value="PST">Pacific Time</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Refresh Interval (seconds)
-          </label>
-          <input
-            type="number"
-            min="5"
-            max="300"
-            value={settings.general.refreshInterval}
-            onChange={e => updateGeneralSetting('refreshInterval', parseInt(e.target.value))}
-            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Timezone
-          </label>
-          <select
-            value={settings.general.timezone}
-            onChange={e => updateGeneralSetting('timezone', e.target.value)}
-            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+        <div className="space-y-2">
+          <Label>Refresh Interval</Label>
+          <Select 
+            value={refreshInterval}
+            onValueChange={(value) => handleSettingChange('refreshInterval', value)}
           >
-            {timezones.map(timezone => (
-              <option key={timezone} value={timezone}>
-                {timezone}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger>
+              <SelectValue placeholder="Select refresh interval" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="10">10 seconds</SelectItem>
+              <SelectItem value="30">30 seconds</SelectItem>
+              <SelectItem value="60">1 minute</SelectItem>
+              <SelectItem value="300">5 minutes</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Data Retention Period
-          </label>
-          <select
-            value={settings.general.retentionPeriod}
-            onChange={e => updateGeneralSetting('retentionPeriod', e.target.value)}
-            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+        <div className="space-y-2">
+          <Label>Data Retention Period</Label>
+          <RadioGroup 
+            value={retentionPeriod}
+            onValueChange={(value) => handleSettingChange('retentionPeriod', value)}
           >
-            <option value="7">7 days</option>
-            <option value="30">30 days</option>
-            <option value="90">90 days</option>
-            <option value="180">180 days</option>
-            <option value="365">1 year</option>
-          </select>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-medium text-gray-700 mb-2">Notifications</h4>
-          <div className="space-y-2">
-            <label className="flex items-center">
-              <input
-                type="checkbox"
-                checked={settings.general.notifications.email}
-                onChange={e => updateGeneralSetting('notifications', {
-                  ...settings.general.notifications,
-                  email: e.target.checked
-                })}
-                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-              <span className="ml-2 text-sm text-gray-600">Email Notifications</span>
-            </label>
-            <label className="flex items-center">
-              <input
-                type="checkbox"
-                checked={settings.general.notifications.slack}
-                onChange={e => updateGeneralSetting('notifications', {
-                  ...settings.general.notifications,
-                  slack: e.target.checked
-                })}
-                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-              <span className="ml-2 text-sm text-gray-600">Slack Notifications</span>
-            </label>
-            <label className="flex items-center">
-              <input
-                type="checkbox"
-                checked={settings.general.notifications.inApp}
-                onChange={e => updateGeneralSetting('notifications', {
-                  ...settings.general.notifications,
-                  inApp: e.target.checked
-                })}
-                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-              <span className="ml-2 text-sm text-gray-600">In-App Notifications</span>
-            </label>
-          </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="flex items-center space-x-2">
+                <RadioGroupItem value="7" id="7days" />
+                <Label htmlFor="7days">7 days</Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <RadioGroupItem value="30" id="30days" />
+                <Label htmlFor="30days">30 days</Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <RadioGroupItem value="90" id="90days" />
+                <Label htmlFor="90days">90 days</Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <RadioGroupItem value="180" id="180days" />
+                <Label htmlFor="180days">180 days</Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <RadioGroupItem value="365" id="1year" />
+                <Label htmlFor="1year">1 year</Label>
+              </div>
+            </div>
+          </RadioGroup>
         </div>
       </div>
     </div>

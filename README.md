@@ -1,90 +1,69 @@
-# DevOps-AI-Sentinel
-![screencapture-localhost-5173-2025-01-15-11_07_05](https://github.com/user-attachments/assets/59ede7bb-3d34-4194-a547-8a20842af0f7)
+# Welcome to your Lovable project
 
-# Project Description
-DevOps AI Sentinel is an advanced open-source monitoring and analytics platform designed to streamline DevOps workflows by providing real-time monitoring, predictive analytics, anomaly detection, and automated resolution suggestions. It integrates seamlessly with popular DevOps tools like Kubernetes, Docker, Jenkins, and Azure DevOps, empowering teams to proactively identify issues, minimize downtime, and optimize system performance.
+## Project info
 
-By leveraging AI and machine learning, DevOps AI Sentinel goes beyond traditional monitoring solutions, enabling dynamic thresholding, intelligent alerting, and actionable insights. Its intuitive dashboard provides a centralized view of system health, pipeline performance, and infrastructure usage, ensuring operational efficiency at every stage of the development lifecycle.
+**URL**: https://lovable.dev/projects/a77500cf-c83b-4a22-98a9-369fa1fb6fa5
 
+## How can I edit this code?
 
-# Key Features
-1. Real-Time Monitoring:
-- Continuously tracks logs, metrics, and events from DevOps tools.
-- Monitors pipeline performance, resource utilization, and application health.
+There are several ways of editing your application.
 
-2. Predictive Analytics:
-- Utilizes AI models to forecast potential system failures and bottlenecks.
-- Predicts resource utilization trends (CPU, memory, disk) for better planning.
+**Use Lovable**
 
-3. Anomaly Detection:
-- Identifies deviations in pipeline execution, infrastructure health, and application performance.
-- Uses machine learning models to detect unexpected patterns in logs and metrics.
+Simply visit the [Lovable Project](https://lovable.dev/projects/a77500cf-c83b-4a22-98a9-369fa1fb6fa5) and start prompting.
 
-4. Automated Resolution Suggestions:
-- Recommends fixes for common issues based on historical data and best practices.
-- Builds a knowledge base of resolutions, improving over time.
+Changes made via Lovable will be committed automatically to this repo.
 
-5. Smart Alerting:
-- Sends alerts via email, Slack, Microsoft Teams, or custom webhooks.
-- Configurable severity levels and dynamic thresholds based on historical performance.
+**Use your preferred IDE**
 
-6. Seamless Integration:
-- Works with Kubernetes for cluster health and pod performance monitoring.
-- Monitors Docker containers, images, and logs.
-- Tracks Jenkins pipeline statuses and logs.
-- Retrieves metrics from Azure DevOps pipelines and builds.
+If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
 
-7. Centralized Dashboard:
-- User-friendly interface with real-time metrics, anomaly heatmaps, and predictive insights.
-- Customizable widgets for different teams and use cases.
+The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
 
-8. Scalability and Extensibility:
-- Built for distributed systems with support for high-traffic environments.
-- Provides APIs and SDKs for extending functionality or integrating with additional tools.
+Follow these steps:
 
-# Technologies and Libraries
-### Frontend (Dashboard):
-- React: For building the user interface.
-- D3.js or Chart.js: For interactive data visualizations.
-- Material-UI or TailwindCSS: For styling and responsive design.
-- WebSockets: For real-time updates on the dashboard.
+```sh
+# Step 1: Clone the repository using the project's Git URL.
+git clone <YOUR_GIT_URL>
 
+# Step 2: Navigate to the project directory.
+cd <YOUR_PROJECT_NAME>
 
-### Backend:
-- Node.js: Optional for specific integrations like webhooks or real-time event processing.
+# Step 3: Install the necessary dependencies.
+npm i
 
-# Instructions to Run the Project
-### Clone the Repository
-- Clone the project repository to your local machine using the following command:
-### git clone https://github.com/fayazkhan121/DevOps-AI-Sentinel.git
-
-
-# Navigate to the Project Directory
-### Move into the project directory:
-cd DevOps-AI-Sentinel
-
-# Install Dependencies
-### Install all the required dependencies:
-npm install
-
-# Run the Development Server
-### Start the development server:
+# Step 4: Start the development server with auto-reloading and an instant preview.
 npm run dev
+```
 
-# Access the Project
-- Open your web browser and navigate to the URL displayed in the terminal (e.g
+**Edit a file directly in GitHub**
 
-http://localhost:5173/
+- Navigate to the desired file(s).
+- Click the "Edit" button (pencil icon) at the top right of the file view.
+- Make your changes and commit the changes.
 
-# Prerequisites
-- Ensure the following are installed and set up on your machine:
+**Use GitHub Codespaces**
 
-### Node.js: Download and install from Node.js official website.
-### npm: Comes with Node.js. Verify installation using npm -v.
+- Navigate to the main page of your repository.
+- Click on the "Code" button (green button) near the top right.
+- Select the "Codespaces" tab.
+- Click on "New codespace" to launch a new Codespace environment.
+- Edit files directly within the Codespace and commit and push your changes once you're done.
 
-  # Use Case 
-  - A DevOps team integrates DevOps AI Sentinel into their Jenkins and Kubernetes-based pipeline. The tool identifies an anomaly in resource utilization during the deployment phase and predicts a potential node failure due to high memory consumption. The team receives a Slack alert with detailed metrics and a recommended resolution (e.g., increasing memory limits for pods). Using the tool’s dashboard, they visualize the anomaly, apply the fix, and prevent downtime.
+## What technologies are used for this project?
 
+This project is built with .
 
+- Vite
+- TypeScript
+- React
+- shadcn-ui
+- Tailwind CSS
 
+## How can I deploy this project?
 
+Simply open [Lovable](https://lovable.dev/projects/a77500cf-c83b-4a22-98a9-369fa1fb6fa5) and click on Share -> Publish.
+
+## I want to use a custom domain - is that possible?
+
+We don't support custom domains (yet). If you want to deploy your project under your own domain then we recommend using Netlify. Visit our docs for more details: [Custom domains](https://docs.lovable.dev/tips-tricks/custom-domain/)

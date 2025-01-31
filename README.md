@@ -1,5 +1,3 @@
-# Welcome to your Lovable project
-
 ## Project info
 
 ![screencapture-localhost-8080-2025-01-31-15_50_54](https://github.com/user-attachments/assets/9ca820de-a28b-4444-b6d2-31721275e87f)

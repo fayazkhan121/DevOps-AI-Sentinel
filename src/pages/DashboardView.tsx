@@ -10,15 +10,27 @@ import { Dashboard, DashboardWidget } from "@/types/dashboard";
 import * as dashboardService from "@/services/dashboardService";
 import { MetricCard } from "@/components/MetricCard";
 import { v4 as uuidv4 } from 'uuid';
+import { useQuery } from "@tanstack/react-query";
+import { fetchPlatformMetrics } from "@/services/platformMetrics";
 
 export default function DashboardView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
-  const [newWidget, setNewWidget] = useState({
+  const [newWidget, setNewWidget] = useState<{
+    title: string;
+    type: 'metric' | 'chart' | 'status' | 'integration';
+  }>({
     title: "",
-    type: "metric" as const,
+    type: "metric",
+  });
+
+  // Fetch metrics data
+  const { data: metrics } = useQuery({
+    queryKey: ['platform-metrics'],
+    queryFn: fetchPlatformMetrics,
+    refetchInterval: 30000, // Refresh every 30 seconds
   });
 
   useEffect(() => {
@@ -123,25 +135,46 @@ export default function DashboardView() {
   };
 
   const renderWidget = (widget: DashboardWidget) => {
-    switch (widget.type) {
-      case "metric":
-        return (
-          <MetricCard
-            title={widget.title}
-            value="0"
-            trend={{ value: 0, label: "vs last period" }}
-            type={widget.type}
-          />
-        );
-      case "chart":
-        return <div className="p-4 bg-card rounded-lg shadow">Chart Widget (Coming Soon)</div>;
-      case "status":
-        return <div className="p-4 bg-card rounded-lg shadow">Status Widget (Coming Soon)</div>;
-      case "integration":
-        return <div className="p-4 bg-card rounded-lg shadow">Integration Widget (Coming Soon)</div>;
-      default:
-        return null;
+    let metricProps: { value: string | number; trend?: { value: number; label: string }; type: 'metric' | 'chart' | 'status' | 'integration' } = {
+      value: '0',
+      type: widget.type
+    };
+    
+    if (widget.type === 'metric' && metrics && metrics.length > 0) {
+      const latestMetric = metrics[metrics.length - 1];
+      const previousMetric = metrics[metrics.length - 2];
+      
+      // Calculate trend if we have previous data
+      let trendValue = 0;
+      if (previousMetric) {
+        const currentValue = Number(latestMetric[widget.title.toLowerCase() as keyof typeof latestMetric]) || 0;
+        const prevValue = Number(previousMetric[widget.title.toLowerCase() as keyof typeof previousMetric]) || 0;
+        if (prevValue !== 0) {
+          trendValue = ((currentValue - prevValue) / prevValue) * 100;
+        }
+      }
+
+      const currentMetricValue = Number(latestMetric[widget.title.toLowerCase() as keyof typeof latestMetric]) || 0;
+
+      metricProps = {
+        value: `${Math.round(currentMetricValue)}%`,
+        trend: { 
+          value: Math.round(trendValue), 
+          label: "vs last period" 
+        },
+        type: widget.type
+      };
     }
+
+    return (
+      <MetricCard
+        key={widget.id}
+        title={widget.title}
+        value={metricProps.value}
+        trend={metricProps.trend}
+        type={widget.type}
+      />
+    );
   };
 
   if (!dashboard) {
@@ -201,7 +234,7 @@ export default function DashboardView() {
                   <label className="text-sm font-medium">Widget Type</label>
                   <Select
                     value={newWidget.type}
-                    onValueChange={(value: "metric" | "chart" | "status" | "integration") =>
+                    onValueChange={(value: 'metric' | 'chart' | 'status' | 'integration') =>
                       setNewWidget({ ...newWidget, type: value })
                     }
                   >

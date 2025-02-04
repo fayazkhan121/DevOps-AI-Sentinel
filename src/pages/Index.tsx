@@ -28,6 +28,7 @@ const Index = () => {
         {/* Real-time metrics overview */}
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
           <MetricCard
+            type="metric"
             title="System Health"
             value="98.5%"
             trend={{ value: 2.1, label: "vs last week" }}
@@ -35,6 +36,7 @@ const Index = () => {
             prediction="AI Prediction: 99.1% (85% confidence)"
           />
           <MetricCard
+            type="metric"
             title="Resource Usage"
             value="72%"
             trend={{ value: -5.4, label: "vs yesterday" }}
@@ -42,6 +44,7 @@ const Index = () => {
             prediction="Predicted peak: 85% in 2 hours"
           />
           <MetricCard
+            type="metric"
             title="Active Services"
             value="45/48"
             trend={{ value: 0, label: "all services operational" }}
@@ -49,6 +52,7 @@ const Index = () => {
             prediction="No service disruptions predicted"
           />
           <MetricCard
+            type="metric"
             title="Database Load"
             value="65%"
             trend={{ value: 12.3, label: "increased load" }}

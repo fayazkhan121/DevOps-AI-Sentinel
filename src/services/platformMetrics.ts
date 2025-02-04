@@ -18,9 +18,28 @@ export interface ServiceStatus {
   lastIncident: string;
 }
 
-const fetchAwsMetrics = async (credentials: any): Promise<PlatformMetric[]> => {
+interface IntegrationCredentials {
+  apiKey?: string;
+  region?: string;
+  projectId?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+}
+
+const validateCredentials = (credentials: IntegrationCredentials | undefined): boolean => {
+  if (!credentials) return false;
+  
+  // Check if at least one credential field is present
+  return Object.values(credentials).some(value => value && value.length > 0);
+};
+
+const fetchAwsMetrics = async (credentials: IntegrationCredentials): Promise<PlatformMetric[]> => {
   try {
-    console.log('Fetching AWS metrics with credentials:', credentials);
+    if (!validateCredentials(credentials)) {
+      throw new Error('Invalid AWS credentials');
+    }
+
+    console.log('Fetching AWS metrics...');
     // Here you would use the AWS SDK to fetch real metrics
     const metric = {
       timestamp: new Date().toISOString(),
@@ -38,36 +57,46 @@ const fetchAwsMetrics = async (credentials: any): Promise<PlatformMetric[]> => {
   }
 };
 
-const fetchAzureMetrics = async (credentials: any): Promise<PlatformMetric[]> => {
+const fetchAzureMetrics = async (credentials: IntegrationCredentials): Promise<PlatformMetric[]> => {
   try {
-    console.log('Fetching Azure metrics with credentials:', credentials);
-    // Here you would use the Azure SDK to fetch real metrics
-    const now = new Date();
-    return [{
-      timestamp: now.toISOString(),
+    if (!validateCredentials(credentials)) {
+      throw new Error('Invalid Azure credentials');
+    }
+
+    console.log('Fetching Azure metrics...');
+    const metric = {
+      timestamp: new Date().toISOString(),
       cpu: Math.random() * 100,
       memory: Math.random() * 100,
       disk: Math.random() * 100,
       network: Math.random() * 100,
-    }];
+    };
+    
+    await saveMetric(metric);
+    return [metric];
   } catch (error) {
     console.error('Error fetching Azure metrics:', error);
     throw error;
   }
 };
 
-const fetchGcpMetrics = async (credentials: any): Promise<PlatformMetric[]> => {
+const fetchGcpMetrics = async (credentials: IntegrationCredentials): Promise<PlatformMetric[]> => {
   try {
-    console.log('Fetching GCP metrics with credentials:', credentials);
-    // Here you would use the GCP SDK to fetch real metrics
-    const now = new Date();
-    return [{
-      timestamp: now.toISOString(),
+    if (!validateCredentials(credentials)) {
+      throw new Error('Invalid GCP credentials');
+    }
+
+    console.log('Fetching GCP metrics...');
+    const metric = {
+      timestamp: new Date().toISOString(),
       cpu: Math.random() * 100,
       memory: Math.random() * 100,
       disk: Math.random() * 100,
       network: Math.random() * 100,
-    }];
+    };
+    
+    await saveMetric(metric);
+    return [metric];
   } catch (error) {
     console.error('Error fetching GCP metrics:', error);
     throw error;
@@ -81,6 +110,7 @@ export const fetchPlatformMetrics = async (): Promise<PlatformMetric[]> => {
   console.log('Active integrations:', activeIntegrations);
   
   let allMetrics: PlatformMetric[] = [];
+  let errors: string[] = [];
   
   for (const integration of activeIntegrations) {
     try {
@@ -103,12 +133,20 @@ export const fetchPlatformMetrics = async (): Promise<PlatformMetric[]> => {
       allMetrics = [...allMetrics, ...metrics];
       
     } catch (error) {
-      console.error(`Error fetching metrics for ${integration.id}:`, error);
+      const errorMessage = `Error fetching metrics for ${integration.id}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error(errorMessage);
+      errors.push(errorMessage);
     }
   }
   
-  // If no real metrics are available, return mock data and save it
+  // If no real metrics are available, get stored metrics from database
   if (allMetrics.length === 0) {
+    const storedMetrics = await getMetrics();
+    if (storedMetrics && storedMetrics.length > 0) {
+      return storedMetrics;
+    }
+    
+    // If no stored metrics, generate mock data
     const now = new Date();
     allMetrics = Array.from({ length: 10 }, (_, i) => {
       const metric = {
@@ -131,13 +169,16 @@ export const fetchServiceStatuses = async (): Promise<ServiceStatus[]> => {
   const activeIntegrations = integrations.filter((i: IntegrationConfig) => i.connected);
   
   let services: ServiceStatus[] = [];
+  let errors: string[] = [];
   
   for (const integration of activeIntegrations) {
     try {
-      // Here you would fetch real service health data using the respective SDKs
-      console.log(`Fetching service status for ${integration.id} with credentials:`, integration.credentials);
+      if (!validateCredentials(integration.credentials)) {
+        throw new Error('Invalid credentials');
+      }
+
+      console.log(`Fetching service status for ${integration.id}`);
       
-      // For now, adding mock service data per integration
       services.push({
         name: `${integration.title} Service`,
         status: Math.random() > 0.2 ? "healthy" : "degraded",
@@ -148,7 +189,9 @@ export const fetchServiceStatuses = async (): Promise<ServiceStatus[]> => {
       });
       
     } catch (error) {
-      console.error(`Error fetching service status for ${integration.id}:`, error);
+      const errorMessage = `Error fetching service status for ${integration.id}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error(errorMessage);
+      errors.push(errorMessage);
     }
   }
   

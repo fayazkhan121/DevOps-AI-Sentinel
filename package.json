@@ -65,6 +65,7 @@
     "tailwindcss-animate": "^1.0.7",
     "uuid": "^11.0.5",
     "vaul": "^0.9.3",
+    "vite_react_shadcn_ts": "file:",
     "zod": "^3.23.8"
   },
   "devDependencies": {

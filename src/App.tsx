@@ -10,6 +10,7 @@ import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 import Dashboards from "./pages/Dashboards";
 import DashboardView from "./pages/DashboardView";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./App.css";
 
 const App: React.FC = () => {
@@ -27,17 +28,19 @@ const App: React.FC = () => {
       <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
         <BrowserRouter>
           <TooltipProvider>
-            <div className="min-h-screen bg-background">
-              <Toaster />
-              <Sonner />
-              <Routes>
-                <Route path="/" element={<Index />} />
-                <Route path="/settings" element={<Settings />} />
-                <Route path="/dashboards" element={<Dashboards />} />
-                <Route path="/dashboard/:id" element={<DashboardView />} />
-                <Route path="*" element={<NotFound />} />
-              </Routes>
-            </div>
+            <ErrorBoundary>
+              <div className="min-h-screen bg-background">
+                <Toaster />
+                <Sonner />
+                <Routes>
+                  <Route path="/" element={<Index />} />
+                  <Route path="/settings" element={<Settings />} />
+                  <Route path="/dashboards" element={<Dashboards />} />
+                  <Route path="/dashboard/:id" element={<DashboardView />} />
+                  <Route path="*" element={<NotFound />} />
+                </Routes>
+              </div>
+            </ErrorBoundary>
           </TooltipProvider>
         </BrowserRouter>
       </ThemeProvider>

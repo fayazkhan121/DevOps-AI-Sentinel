@@ -4,6 +4,7 @@ import { GeneralSettings } from "@/components/settings/GeneralSettings";
 import { NotificationSettings } from "@/components/settings/NotificationSettings";
 import { IntegrationsSettings } from "@/components/settings/IntegrationsSettings";
 import { AlertSettings } from "@/components/settings/AlertSettings";
+import { AdvancedSettingsPanel } from "@/components/settings/AdvancedSettingsPanel";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -71,6 +72,7 @@ export default function Settings() {
             <TabsTrigger value="notifications">Notifications</TabsTrigger>
             <TabsTrigger value="alerts">Alert Rules</TabsTrigger>
             <TabsTrigger value="integrations">Integrations</TabsTrigger>
+            <TabsTrigger value="advanced">Advanced</TabsTrigger>
           </TabsList>
           <TabsContent value="general" className="space-y-4">
             <GeneralSettings />
@@ -83,6 +85,9 @@ export default function Settings() {
           </TabsContent>
           <TabsContent value="integrations" className="space-y-4">
             <IntegrationsSettings />
+          </TabsContent>
+          <TabsContent value="advanced" className="space-y-4">
+            <AdvancedSettingsPanel />
           </TabsContent>
         </Tabs>
       </div>

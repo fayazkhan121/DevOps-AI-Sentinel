@@ -1,15 +1,27 @@
-import { Bell, Settings, User } from "lucide-react";
+import { Bell, Settings, User, Search as SearchIcon } from "lucide-react";
 import { Button } from "./ui/button";
 import { TimeRangeFilter, TimeRange } from "./TimeRangeFilter";
 import { useState, useEffect } from "react";
 import WebSocketService from "@/services/websocket";
 import { Alert } from "@/types/metrics";
 import { useNavigate } from "react-router-dom";
+import { CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { cn } from "@/lib/utils";
+
+interface SearchResult {
+  type: string;
+  title: string;
+  description?: string;
+  link: string;
+  icon?: React.ReactNode;
+}
 
 export function Header() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [notifications, setNotifications] = useState<Alert[]>([]);
   const [hasNewNotifications, setHasNewNotifications] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -18,7 +30,6 @@ export function Header() {
     ws.subscribeToAlerts((newAlert: Alert) => {
       setNotifications(prev => {
         const updated = [...prev, newAlert];
-        // Keep only last 99 notifications
         if (updated.length > 99) {
           updated.shift();
         }
@@ -31,6 +42,135 @@ export function Header() {
       ws.unsubscribe('new-alert', ws.subscribeToAlerts);
     };
   }, []);
+
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setOpen((open) => !open);
+      }
+    };
+
+    document.addEventListener('keydown', down);
+    return () => document.removeEventListener('keydown', down);
+  }, []);
+
+  const getAllSearchableFeatures = (): SearchResult[] => {
+    return [
+      {
+        type: "Dashboard",
+        title: "System Overview",
+        description: "Main system dashboard with key metrics",
+        link: "/"
+      },
+      {
+        type: "Dashboard",
+        title: "Service Health",
+        description: "Monitor service health and performance",
+        link: "/dashboards"
+      },
+      {
+        type: "Dashboard",
+        title: "Resource Usage",
+        description: "Track system resource utilization",
+        link: "/dashboards"
+      },
+      {
+        type: "Settings",
+        title: "Notification Settings",
+        description: "Configure notification preferences and alerts",
+        link: "/settings"
+      },
+      {
+        type: "Settings",
+        title: "Integration Settings",
+        description: "Manage cloud service integrations",
+        link: "/settings"
+      },
+      {
+        type: "Settings",
+        title: "Alert Settings",
+        description: "Configure alert thresholds and rules",
+        link: "/settings"
+      },
+      {
+        type: "Feature",
+        title: "Metrics Timeline",
+        description: "View historical metrics and trends",
+        link: "/"
+      },
+      {
+        type: "Feature",
+        title: "Pipeline Status",
+        description: "Monitor CI/CD pipeline status",
+        link: "/"
+      },
+      {
+        type: "Feature",
+        title: "Anomaly Detection",
+        description: "AI-powered system anomaly detection",
+        link: "/"
+      },
+      {
+        type: "Feature",
+        title: "Kubernetes Overview",
+        description: "Kubernetes cluster status and metrics",
+        link: "/"
+      },
+      {
+        type: "Integration",
+        title: "AWS Services",
+        description: "Amazon Web Services integration",
+        link: "/settings"
+      },
+      {
+        type: "Integration",
+        title: "Azure Services",
+        description: "Microsoft Azure cloud services",
+        link: "/settings"
+      },
+      {
+        type: "Integration",
+        title: "GCP Services",
+        description: "Google Cloud Platform integration",
+        link: "/settings"
+      },
+      {
+        type: "Integration",
+        title: "Database Monitoring",
+        description: "Database performance monitoring",
+        link: "/settings"
+      }
+    ];
+  };
+
+  const handleSearch = (value: string) => {
+    if (!value) {
+      setSearchResults([]);
+      return;
+    }
+
+    const allFeatures = getAllSearchableFeatures();
+    const searchTerm = value.toLowerCase();
+
+    const results = allFeatures.filter(item => 
+      item.title.toLowerCase().includes(searchTerm) ||
+      item.description?.toLowerCase().includes(searchTerm) ||
+      item.type.toLowerCase().includes(searchTerm)
+    );
+
+    const groupedResults = results.reduce((acc: SearchResult[], result) => {
+      if (result.title.toLowerCase() === searchTerm) {
+        return [result, ...acc];
+      }
+      if (result.title.toLowerCase().startsWith(searchTerm)) {
+        return [...acc.filter(r => r.title.toLowerCase() === searchTerm), result, ...acc.filter(r => r.title.toLowerCase() !== searchTerm)];
+      }
+      return [...acc, result];
+    }, []);
+
+    setSearchResults(groupedResults);
+  };
 
   const handleBellClick = () => {
     setHasNewNotifications(false);
@@ -49,13 +189,54 @@ export function Header() {
           <span>DevOps AI Sentinel</span>
         </div>
         <div className="flex-1 px-4">
-          <div className="relative">
-            <input
-              type="search"
-              placeholder="Search..."
-              className="h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          <Button
+            variant="outline"
+            className="relative h-9 w-full justify-start text-sm text-muted-foreground"
+            onClick={() => setOpen(true)}
+          >
+            <SearchIcon className="mr-2 h-4 w-4" />
+            <span>Search features, dashboards, settings... </span>
+            <kbd className="pointer-events-none absolute right-2 top-2 hidden h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium opacity-100 sm:flex">
+              <span className="text-xs">⌘</span>K
+            </kbd>
+          </Button>
+          <CommandDialog open={open} onOpenChange={setOpen}>
+            <CommandInput 
+              placeholder="Search features, dashboards, settings..." 
+              onValueChange={handleSearch}
             />
-          </div>
+            <CommandList>
+              <CommandEmpty>No results found.</CommandEmpty>
+              {searchResults.length > 0 && (
+                <>
+                  {Array.from(new Set(searchResults.map(r => r.type))).map(type => (
+                    <CommandGroup key={type} heading={type}>
+                      {searchResults
+                        .filter(result => result.type === type)
+                        .map((result, index) => (
+                          <CommandItem
+                            key={`${result.type}-${index}`}
+                            onSelect={() => {
+                              navigate(result.link);
+                              setOpen(false);
+                            }}
+                          >
+                            <div>
+                              <h3 className="font-medium">{result.title}</h3>
+                              {result.description && (
+                                <p className="text-sm text-muted-foreground">
+                                  {result.description}
+                                </p>
+                              )}
+                            </div>
+                          </CommandItem>
+                        ))}
+                    </CommandGroup>
+                  ))}
+                </>
+              )}
+            </CommandList>
+          </CommandDialog>
         </div>
         <nav className="flex items-center gap-4">
           <TimeRangeFilter value={timeRange} onChange={setTimeRange} />

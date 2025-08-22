@@ -351,21 +351,28 @@ export interface User {
   id: string;
   username: string;
   email: string;
-  role: 'admin' | 'operator' | 'viewer';
+  fullName: string;
+  role: 'admin' | 'user' | 'viewer';
+  permissions: string[];
+  passwordHash: string;
   isActive: boolean;
   lastLogin?: string;
   createdAt: string;
   updatedAt: string;
+  failedLoginAttempts: number;
+  lockedUntil?: string;
 }
 
 export interface UserSession {
   id: string;
   userId: string;
-  token: string;
-  expiresAt: string;
+  username: string;
   ipAddress: string;
   userAgent: string;
   createdAt: string;
+  expiresAt: string;
+  isActive: boolean;
+  lastActivity: string;
 }
 
 // Audit Types
@@ -373,14 +380,11 @@ export interface AuditLog {
   id: string;
   userId: string;
   action: string;
-  resource: string;
-  resourceId: string;
-  details: Record<string, any>;
+  description: string;
+  details?: string;
   ipAddress: string;
   userAgent: string;
   timestamp: string;
-  success: boolean;
-  errorMessage?: string;
 }
 
 // Configuration Types

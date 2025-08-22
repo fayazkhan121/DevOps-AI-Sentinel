@@ -8,8 +8,8 @@ export class IntegrationService {
   private socket: any = null;
 
   constructor() {
-    this.baseUrl = process.env.VITE_API_URL || '';
-    this.apiKey = process.env.VITE_API_KEY || '';
+    this.baseUrl = '';
+    this.apiKey = '';
     this.initializeWebSocket();
   }
 

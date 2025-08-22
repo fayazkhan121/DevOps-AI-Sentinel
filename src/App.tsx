@@ -3,14 +3,20 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ThemeProvider } from "next-themes";
 import Index from "./pages/Index";
+import Login from "./pages/Login";
 import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
-import Dashboards from "./pages/Dashboards";
+import DashboardManager from "./pages/DashboardManager";
 import DashboardView from "./pages/DashboardView";
+import AdminUsers from "./pages/AdminUsers";
+import UserProfilePage from "./pages/UserProfile";
+import DatabaseSettings from "./pages/DatabaseSettings";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ProtectedRoute } from "./components/auth/ProtectedRoute";
+import { Layout } from "./components/Layout";
 import "./App.css";
 
 const App: React.FC = () => {
@@ -33,11 +39,63 @@ const App: React.FC = () => {
                 <Toaster />
                 <Sonner />
                 <Routes>
-                  <Route path="/" element={<Index />} />
-                  <Route path="/settings" element={<Settings />} />
-                  <Route path="/dashboards" element={<Dashboards />} />
-                  <Route path="/dashboard/:id" element={<DashboardView />} />
-                  <Route path="*" element={<NotFound />} />
+                  {/* Public routes */}
+                  <Route path="/login" element={<Login />} />
+                  <Route path="/setup" element={<Login />} />
+                  
+                  {/* Protected routes - redirect to login if not authenticated */}
+                  <Route path="/" element={
+                    <ProtectedRoute>
+                      <Layout>
+                        <Index />
+                      </Layout>
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/settings" element={
+                    <ProtectedRoute>
+                      <Layout>
+                        <Settings />
+                      </Layout>
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/dashboards" element={
+                    <ProtectedRoute>
+                      <Layout>
+                        <DashboardManager />
+                      </Layout>
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/dashboard/:id" element={
+                    <ProtectedRoute>
+                      <Layout>
+                        <DashboardView />
+                      </Layout>
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/admin/users" element={
+                    <ProtectedRoute requiredRole="admin">
+                      <Layout>
+                        <AdminUsers />
+                      </Layout>
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/profile" element={
+                    <ProtectedRoute>
+                      <Layout>
+                        <UserProfilePage />
+                      </Layout>
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/database-settings" element={
+                    <ProtectedRoute>
+                      <Layout>
+                        <DatabaseSettings />
+                      </Layout>
+                    </ProtectedRoute>
+                  } />
+                  
+                  {/* Catch all - redirect to login */}
+                  <Route path="*" element={<Navigate to="/login" replace />} />
                 </Routes>
               </div>
             </ErrorBoundary>

@@ -1,12 +1,20 @@
-import { Bell, Settings, User, Search as SearchIcon } from "lucide-react";
+import { Bell, Settings, User as UserIcon, Search as SearchIcon, LogOut, Shield, Users, Database, AlertTriangle, BarChart3, Home } from "lucide-react";
 import { Button } from "./ui/button";
 import { TimeRangeFilter, TimeRange } from "./TimeRangeFilter";
 import { useState, useEffect } from "react";
-import WebSocketService from "@/services/websocket";
-import { Alert } from "@/types/metrics";
 import { useNavigate } from "react-router-dom";
 import { CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
+import { authService } from "@/services/authService";
+import { User } from "@/types";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 interface SearchResult {
   type: string;
@@ -18,30 +26,62 @@ interface SearchResult {
 
 export function Header() {
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
-  const [notifications, setNotifications] = useState<Alert[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const [hasNewNotifications, setHasNewNotifications] = useState(false);
   const [open, setOpen] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [showSessionWarning, setShowSessionWarning] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
-    const ws = WebSocketService.getInstance();
-    
-    ws.subscribeToAlerts((newAlert: Alert) => {
-      setNotifications(prev => {
-        const updated = [...prev, newAlert];
-        if (updated.length > 99) {
-          updated.shift();
-        }
-        return updated;
-      });
-      setHasNewNotifications(true);
-    });
-
-    return () => {
-      ws.unsubscribe('new-alert', ws.subscribeToAlerts);
+    // Check authentication status
+    const checkAuth = async () => {
+      const user = authService.getCurrentUser();
+      if (!user) {
+        // If no user, redirect to login
+        navigate('/login', { replace: true });
+        return;
+      }
+      setCurrentUser(user);
     };
-  }, []);
+
+    checkAuth();
+    
+    // Refresh session every 10 minutes to keep user logged in
+    const refreshInterval = setInterval(async () => {
+      try {
+        await authService.refreshSession();
+      } catch (error) {
+        console.error('Session refresh failed:', error);
+      }
+    }, 10 * 60 * 1000);
+    
+    // Check auth every 5 minutes
+    const authInterval = setInterval(checkAuth, 5 * 60 * 1000);
+    
+    // Show session warning 2 minutes before expiry
+    const warningInterval = setInterval(() => {
+      const token = localStorage.getItem('authToken');
+      if (token) {
+        try {
+          const decoded = JSON.parse(atob(token));
+          const timeUntilExpiry = decoded.exp - Math.floor(Date.now() / 1000);
+          if (timeUntilExpiry <= 120 && timeUntilExpiry > 0) { // 2 minutes warning
+            setShowSessionWarning(true);
+          }
+        } catch (error) {
+          console.error('Failed to decode token for warning:', error);
+        }
+      }
+    }, 60 * 1000); // Check every minute
+    
+    return () => {
+      clearInterval(refreshInterval);
+      clearInterval(authInterval);
+      clearInterval(warningInterval);
+    };
+  }, [navigate]);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -172,9 +212,20 @@ export function Header() {
     setSearchResults(groupedResults);
   };
 
-  const handleBellClick = () => {
-    setHasNewNotifications(false);
+  const handleLogout = async () => {
+    try {
+      await authService.logout();
+      setCurrentUser(null);
+      navigate('/login', { replace: true });
+    } catch (error) {
+      console.error('Logout failed:', error);
+    }
   };
+
+  // Don't render header if no user (will redirect to login)
+  if (!currentUser) {
+    return null;
+  }
 
   return (
     <header className="border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -239,9 +290,36 @@ export function Header() {
           </CommandDialog>
         </div>
         <nav className="flex items-center gap-4">
+          <Button variant="ghost" size="icon" onClick={() => navigate('/')} title="Home">
+            <Home className="h-4 w-4" />
+          </Button>
           <TimeRangeFilter value={timeRange} onChange={setTimeRange} />
+          
+          {/* Session Warning */}
+          {showSessionWarning && (
+            <div className="flex items-center gap-2 px-3 py-1 bg-yellow-100 border border-yellow-300 rounded-md">
+              <AlertTriangle className="h-4 w-4 text-yellow-600" />
+              <span className="text-sm text-yellow-800">Session expiring soon</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={async () => {
+                  try {
+                    await authService.refreshSession();
+                    setShowSessionWarning(false);
+                  } catch (error) {
+                    console.error('Failed to refresh session:', error);
+                  }
+                }}
+                className="text-xs h-6 px-2"
+              >
+                Extend
+              </Button>
+            </div>
+          )}
+          
           <div className="relative">
-            <Button variant="ghost" size="icon" onClick={handleBellClick}>
+            <Button variant="ghost" size="icon">
               <Bell className="h-4 w-4" />
               {notifications.length > 0 && (
                 <span className="absolute -top-1 -right-1 flex items-center justify-center">
@@ -253,12 +331,81 @@ export function Header() {
               )}
             </Button>
           </div>
+          <Button variant="ghost" size="icon" onClick={() => navigate('/dashboards')} title="Dashboard Manager">
+            <BarChart3 className="h-4 w-4" />
+          </Button>
           <Button variant="ghost" size="icon" onClick={() => navigate('/settings')}>
             <Settings className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="icon">
-            <User className="h-4 w-4" />
+          <Button variant="ghost" size="icon" onClick={() => navigate('/database-settings')} title="Database Settings">
+            <Database className="h-4 w-4" />
           </Button>
+          
+          {/* User Management - Admin Only */}
+          {currentUser?.role === 'admin' && (
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              onClick={() => navigate('/admin/users')}
+              title="User Management"
+            >
+              <Users className="h-4 w-4" />
+            </Button>
+          )}
+
+                     {/* User Profile Menu */}
+           <DropdownMenu>
+             <DropdownMenuTrigger asChild>
+               <Button variant="ghost" size="icon" className="relative">
+                 <UserIcon className="h-4 w-4" />
+                 {currentUser && (
+                   <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-green-500" />
+                 )}
+               </Button>
+             </DropdownMenuTrigger>
+             <DropdownMenuContent align="end" className="w-56">
+               {currentUser ? (
+                 <>
+                   <DropdownMenuLabel className="font-normal">
+                     <div className="flex flex-col space-y-1">
+                       <p className="text-sm font-medium leading-none">{currentUser.fullName}</p>
+                       <p className="text-xs leading-none text-muted-foreground">
+                         @{currentUser.username}
+                       </p>
+                       <div className="flex items-center space-x-1">
+                         <Shield className="h-3 w-3" />
+                         <span className="text-xs text-muted-foreground capitalize">
+                           {currentUser.role}
+                         </span>
+                       </div>
+                     </div>
+                   </DropdownMenuLabel>
+                   <DropdownMenuSeparator />
+                   <DropdownMenuItem onClick={() => navigate('/profile')}>
+                     <UserIcon className="mr-2 h-4 w-4" />
+                     <span>Profile</span>
+                   </DropdownMenuItem>
+                   <DropdownMenuItem onClick={() => navigate('/settings')}>
+                     <Settings className="mr-2 h-4 w-4" />
+                     <span>Settings</span>
+                   </DropdownMenuItem>
+                   <DropdownMenuSeparator />
+                   <DropdownMenuItem onClick={handleLogout}>
+                     <LogOut className="mr-2 h-4 w-4" />
+                     <span>Log out</span>
+                   </DropdownMenuItem>
+                 </>
+               ) : (
+                 <>
+                   <DropdownMenuLabel>Not signed in</DropdownMenuLabel>
+                   <DropdownMenuItem onClick={() => navigate('/login')}>
+                     <UserIcon className="mr-2 h-4 w-4" />
+                     <span>Sign in</span>
+                   </DropdownMenuItem>
+                 </>
+               )}
+             </DropdownMenuContent>
+           </DropdownMenu>
         </nav>
       </div>
     </header>

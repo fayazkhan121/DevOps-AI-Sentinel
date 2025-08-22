@@ -11,11 +11,11 @@ export class MonitoringService {
   private gcpMonitoringClient: monitoring_v3.MetricServiceClient;
 
   constructor() {
-    this.baseUrl = process.env.VITE_API_URL || '';
-    this.apiKey = process.env.VITE_API_KEY || '';
+    this.baseUrl = '';
+    this.apiKey = '';
     
     // Initialize cloud provider clients
-    this.cloudWatchClient = new CloudWatchClient({ region: process.env.AWS_REGION });
+    this.cloudWatchClient = new CloudWatchClient({ region: 'us-east-1' });
     this.gcpMonitoringClient = new monitoring_v3.MetricServiceClient();
   }
 

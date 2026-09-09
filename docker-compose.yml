@@ -1,0 +1,17 @@
+services:
+  sentinel:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-long-random-string}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-change-this-to-a-long-random-string}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      SQLITE_PATH: /data/sentinel.db
+    volumes:
+      - sentinel-data:/data
+
+volumes:
+  sentinel-data:

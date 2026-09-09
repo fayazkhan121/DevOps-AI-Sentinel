@@ -7,402 +7,140 @@
 
 ## Overview
 
-DevOps AI Sentinel is a comprehensive, enterprise-grade monitoring and alerting platform designed for modern DevOps teams. It provides real-time monitoring of cloud infrastructure, DevOps tools, applications, and services with advanced alerting, intelligent dashboards, and seamless integrations.
+DevOps AI Sentinel is a monitoring and alerting platform for DevOps teams. It is a React UI plus a Node.js API.
+
+- The **API** (`server/`) owns authentication, SQLite storage, metric collection, alert evaluation, and notification delivery.
+- The **UI** talks to `/api` and a Socket.IO stream. It does not store passwords or cloud secrets in the browser.
+- Host CPU/memory/disk/network metrics are collected from the machine running the API. AWS, Azure, GCP, Kubernetes, Docker, Jenkins, Git, and Prometheus are queried only when you save working credentials.
 
 ## Key Features
 
-### **Multi-Cloud Monitoring**
-- **AWS Integration**: EC2, CloudWatch, RDS, Lambda, and more
-- **Azure Integration**: Virtual Machines, App Services, SQL Database
-- **GCP Integration**: Compute Engine, Cloud Functions, BigQuery
-- **Real-time Metrics**: CPU, memory, network, storage, and cost monitoring
-- **Resource Inventory**: Automatic discovery and tracking of cloud resources
+### Multi-Cloud Monitoring
+- AWS: EC2 inventory and CloudWatch CPU when access keys are configured
+- Azure: VM inventory via ARM when a service principal is configured
+- GCP: instance count when a project access token is configured
+- Host metrics: CPU, memory, disk, network, load, uptime from the API process
 
-### **DevOps Tools Integration**
-- **Kubernetes**: Pod monitoring, cluster health, resource utilization
-- **Docker**: Container metrics, performance tracking, health checks
-- **Jenkins**: Build status, pipeline monitoring, job analytics
-- **Git Platforms**: GitHub, GitLab, Bitbucket, Azure DevOps integration
-- **CI/CD Monitoring**: Pipeline health, deployment tracking, failure analysis
+### DevOps Tools Integration
+- Kubernetes, Docker, Jenkins, GitHub/GitLab, Prometheus — live queries when credentials exist
+- Terraform and Ansible settings forms can be stored as integrations; extend `server/collectors.ts` to add vendor-specific scrapes
 
-### **Advanced Database Support**
-- **Multiple Database Types**: SQLite, PostgreSQL, MySQL, MongoDB, Redis
-- **Automatic Fallback**: Seamless fallback to local storage if external DB fails
-- **Connection Management**: Connection pooling, health checks, automatic reconnection
-- **Data Migration**: Easy migration between different database types
+### Database
+- Application database: SQLite (server-side, WAL mode)
+- Secrets at rest: AES-256-GCM
 
-### **Intelligent Alerting System**
-- **Multi-Channel Notifications**: Email, Slack, Discord, Telegram, Webhooks
-- **Advanced Alert Rules**: Complex conditions, thresholds, and duration-based triggers
-- **Escalation Policies**: Multi-level escalation with configurable delays
-- **Alert Management**: Acknowledgment, resolution, and history tracking
-- **Template System**: Customizable alert templates for different scenarios
+### Alerting
+- Threshold rules evaluated on collected metrics
+- Channels: email (SMTP), Slack, Discord, Telegram, generic webhook, Twilio SMS
+- Acknowledge/resolve in the API; audit log for delivery failures
 
-### **Advanced Dashboard Management**
-- **Multiple Dashboards**: Create and manage unlimited dashboards
-- **Custom Widgets**: Metric cards, charts, tables, status indicators
-- **Real-time Updates**: Live data refresh with configurable intervals
-- **Dashboard Templates**: Pre-built templates for common monitoring scenarios
-- **Export/Import**: Share dashboards across teams and environments
-- **Responsive Design**: Mobile-friendly interface with adaptive layouts
+### Dashboards
+- CRUD dashboards stored in SQLite
+- Export/import JSON
+- Live charts from `/api/metrics` and Socket.IO `metrics-update`
 
-### **Enterprise Security**
-- **Authentication & Authorization**: Role-based access control
-- **Data Encryption**: AES-256 encryption for sensitive data
-- **Audit Logging**: Comprehensive audit trail for compliance
-- **IP Whitelisting**: Restrict access to specific IP addresses
-- **Session Management**: Configurable session timeouts and security policies
+### Security
+- bcrypt password hashes, signed JWT sessions
+- Role-based permissions enforced on the API
+- Optional IP allowlist
+- Optional GitHub OAuth SSO
+- Agent ingest endpoint with hashed API keys
+- Rate limiting and Helmet
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Frontend (React + TypeScript)           │
-├─────────────────────────────────────────────────────────────┤
-│                    Advanced Services Layer                  │
-│  ┌─────────────┬─────────────┬─────────────┬─────────────┐  │
-│  │   Cloud     │   DevOps    │  Advanced   │  Advanced   │  │
-│  │ Monitoring  │Integrations │  Database   │ Alerting    │  │
-│  └─────────────┴─────────────┴─────────────┴─────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                    Data Layer                               │
-│  ┌─────────────┬─────────────┬─────────────┬─────────────┐  │
-│  │  SQLite     │PostgreSQL   │   MySQL     │  MongoDB    │  │
-│  │  Redis      │ IndexedDB   │   Custom    │   External  │  │
-│  └─────────────┴─────────────┴─────────────┴─────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                    External Integrations                    │
-│  ┌─────────────┬─────────────┬─────────────┬─────────────┐  │
-│  │     AWS     │    Azure    │     GCP     │ Kubernetes  │  │
-│  │   Docker    │   Jenkins   │    Git      │  Webhooks   │  │
-│  └─────────────┴─────────────┴─────────────┴─────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│           UI (React + Vite :5173)           │
+└──────────────────────┬──────────────────────┘
+                       │  /api  +  /socket.io
+┌──────────────────────▼──────────────────────┐
+│        API (Express + SQLite :3000)         │
+│  auth · metrics · alerts · dashboards       │
+│  collectors (host + optional vendor APIs)   │
+└─────────────────────────────────────────────┘
 ```
 
 ## Getting Started
 
 ### Prerequisites
 
-- Node.js 18+ 
-- npm or yarn
-- Modern web browser
-- (Optional) External database (PostgreSQL, MySQL, MongoDB, Redis)
+- Node.js 22+
+- npm
 
 ### Installation
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/your-org/devops-ai-sentinel.git
-   cd devops-ai-sentinel
-   ```
+```bash
+git clone https://github.com/fayazkhan121/DevOps-AI-Sentinel.git
+cd DevOps-AI-Sentinel
+cp env.example .env
+# set JWT_SECRET and ENCRYPTION_KEY
+npm install
+npm run dev
+```
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   # or
-   yarn install
-   ```
+Open http://localhost:5173 and complete first-time setup (password length at least 8 characters).
 
-3. **Start development server**
-   ```bash
-   npm run dev
-   # or
-   yarn dev
-   ```
-
-4. **Open your browser**
-   Navigate to `http://localhost:5173`
+The API is http://localhost:3000 (`GET /api/health`).
 
 ### Quick Configuration
 
-1. **Access Settings**: Go to Settings → Advanced tab
-2. **Configure Database**: Choose your preferred database type
-3. **Add Cloud Providers**: Configure AWS, Azure, or GCP credentials
-4. **Setup DevOps Tools**: Connect Kubernetes, Docker, or Jenkins
-5. **Configure Alerts**: Set up notification channels and alert rules
-
-## Configuration
-
-### Database Configuration
-
-The platform supports multiple database types with automatic fallback:
-
-```typescript
-// Example: PostgreSQL Configuration
-{
-  type: 'postgresql',
-  host: 'localhost',
-  port: 5432,
-  username: 'devops_user',
-  password: 'secure_password',
-  database: 'devops_sentinel',
-  ssl: true
-}
-```
-
-### Cloud Provider Setup
-
-#### AWS Configuration
-```typescript
-{
-  aws: {
-    accessKeyId: 'AKIA...',
-    secretAccessKey: 'your-secret-key',
-    region: 'us-east-1'
-  }
-}
-```
-
-#### Azure Configuration
-```typescript
-{
-  azure: {
-    tenantId: 'your-tenant-id',
-    clientId: 'your-client-id',
-    clientSecret: 'your-client-secret',
-    subscriptionId: 'your-subscription-id'
-  }
-}
-```
-
-#### GCP Configuration
-```typescript
-{
-  gcp: {
-    projectId: 'your-project-id',
-    keyFilename: '/path/to/service-account-key.json'
-  }
-}
-```
-
-### DevOps Tools Integration
-
-#### Kubernetes
-```typescript
-{
-  apiServer: 'https://kubernetes.default.svc',
-  token: 'your-service-account-token',
-  namespace: 'default',
-  context: 'default'
-}
-```
-
-#### Docker
-```typescript
-{
-  host: 'localhost',
-  port: 2375,
-  tls: false
-}
-```
-
-#### Jenkins
-```typescript
-{
-  url: 'http://jenkins.example.com',
-  username: 'jenkins-user',
-  apiToken: 'your-api-token'
-}
-```
-
-## Dashboard Templates
-
-### Infrastructure Monitoring
-- CPU, memory, and disk usage tracking
-- Network performance monitoring
-- Service health status
-- Resource utilization trends
-
-### Cloud Operations
-- Cost analysis and budgeting
-- Resource optimization recommendations
-- Performance metrics across regions
-- Compliance and security monitoring
-
-### DevOps Pipeline
-- CI/CD pipeline health
-- Build and deployment status
-- Code quality metrics
-- Release tracking and rollback
-
-## Alert Configuration
-
-### Alert Rules
-```typescript
-{
-  id: 'high-cpu-usage',
-  name: 'High CPU Usage',
-  condition: {
-    metric: 'cpu_usage',
-    operator: '>',
-    value: 80,
-    duration: '5m',
-    threshold: 3
-  },
-  actions: {
-    email: { recipients: ['admin@company.com'] },
-    slack: { channel: '#alerts' },
-    webhook: { url: 'https://pagerduty.com/webhook' }
-  }
-}
-```
-
-### Notification Channels
-- **Email**: SMTP configuration with templates
-- **Slack**: Webhook integration with rich formatting
-- **Webhook**: Custom HTTP endpoints
-- **SMS**: Twilio integration
-- **Push**: Web push notifications
-
-### Escalation Policies
-```typescript
-{
-  levels: [
-    {
-      level: 1,
-      delay: '5m',
-      channels: ['email'],
-      actions: []
-    },
-    {
-      level: 2,
-      delay: '15m',
-      channels: ['email', 'slack'],
-      actions: []
-    },
-    {
-      level: 3,
-      delay: '1h',
-      channels: ['email', 'slack', 'webhook'],
-      actions: []
-    }
-  ]
-}
-```
-
-## API Integration
-
-### REST API Endpoints
-- `GET /api/metrics` - Retrieve metrics data
-- `POST /api/alerts` - Create or update alerts
-- `GET /api/dashboards` - List available dashboards
-- `POST /api/integrations` - Configure integrations
-
-### WebSocket Events
-- `metrics_update` - Real-time metrics updates
-- `alert_triggered` - Alert notifications
-- `status_change` - Service status changes
+1. Settings → Advanced: save cloud / Kubernetes / Docker / Jenkins credentials
+2. Credentials are encrypted and stored on the server; collectors run on the API interval
+3. Add a notification channel and a matching alert rule
 
 ## Testing
 
 ```bash
-# Run unit tests
-npm run test
-
-# Run integration tests
-npm run test:integration
-
-# Run e2e tests
-npm run test:e2e
-
-# Generate test coverage
-npm run test:coverage
+npm test
+npm run build
+npm run lint
 ```
 
 ## Deployment
 
-### Docker Deployment
-```bash
-# Build Docker image
-docker build -t devops-ai-sentinel .
+### Docker
 
-# Run container
-docker run -p 3000:3000 devops-ai-sentinel
+```bash
+docker compose up --build
 ```
 
-### Production Build
+The container serves the production UI from `dist/` on port 3000.
+
+### Production (without Docker)
+
 ```bash
-# Build for production
 npm run build
-
-# Preview production build
-npm run preview
+NODE_ENV=production PORT=3000 npm start
 ```
 
-### Environment Variables
+## REST API
+
+- `GET /api/health`
+- `POST /api/setup` `POST /api/auth/login` `POST /api/auth/logout`
+- `GET /api/metrics` `GET /api/metrics/latest` `POST /api/metrics/collect`
+- `GET /api/alerts` `POST /api/alerts/:id/ack` `POST /api/alerts/:id/resolve`
+- `GET|POST /api/dashboards` `GET /api/dashboards/:id/export`
+- `GET|POST /api/integrations`
+- `POST /api/agents/ingest` (header `X-Agent-Key`)
+- `GET /api/reports/compliance?format=csv|json`
+
+### WebSocket (Socket.IO)
+
+Authenticate with the JWT in `auth.token`. Events: `metrics-update`, `service-health`.
+
+## Host agent
+
 ```bash
-# Database Configuration
-DATABASE_TYPE=postgresql
-DATABASE_HOST=localhost
-DATABASE_PORT=5432
-DATABASE_USER=devops_user
-DATABASE_PASSWORD=secure_password
-
-# Cloud Provider Credentials
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-AZURE_TENANT_ID=your-tenant-id
-GCP_PROJECT_ID=your-project-id
-
-# Security
-JWT_SECRET=your-jwt-secret
-ENCRYPTION_KEY=your-encryption-key
+SENTINEL_URL=http://localhost:3000 AGENT_KEY=... node agent/collect.mjs
 ```
 
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
-
-### Development Setup
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
+Create a key with `POST /api/agents/keys` as an admin.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
-## Support
+## Contributing
 
-- **Documentation**: [docs.devops-ai-sentinel.com](https://docs.devops-ai-sentinel.com)
-- **Issues**: [GitHub Issues](https://github.com/your-org/devops-ai-sentinel/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/devops-ai-sentinel/discussions)
-- **Email**: support@devops-ai-sentinel.com
-
-## Acknowledgments
-
-- Built with [React](https://reactjs.org/) and [TypeScript](https://www.typescriptlang.org/)
-- Styled with [Tailwind CSS](https://tailwindcss.com/)
-- UI components from [shadcn/ui](https://ui.shadcn.com/)
-- Charts powered by [Recharts](https://recharts.org/)
-- Icons from [Lucide React](https://lucide.dev/)
-
-## Roadmap
-
-### v2.0 (Q2 2024)
-- [ ] Machine Learning-powered anomaly detection
-- [ ] Advanced cost optimization recommendations
-- [ ] Multi-tenant architecture
-- [ ] Advanced RBAC and SSO integration
-
-### v2.1 (Q3 2024)
-- [ ] Custom metric collection agents
-- [ ] Advanced reporting and analytics
-- [ ] Mobile application
-- [ ] API rate limiting and quotas
-
-### v2.2 (Q4 2024)
-- [ ] Edge computing monitoring
-- [ ] IoT device integration
-- [ ] Advanced automation workflows
-- [ ] Compliance reporting templates
-
----
-
-**DevOps AI Sentinel** - Empowering DevOps teams with intelligent monitoring and alerting solutions.
-
-
-
-
+See [CONTRIBUTING.md](CONTRIBUTING.md).

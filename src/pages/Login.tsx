@@ -1,22 +1,14 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Eye, EyeOff, Shield, Database, Cloud, Server, RefreshCw } from "lucide-react";
 import { authService } from "@/services/authService";
-import { advancedDatabase } from "@/services/advancedDatabase";
+import { apiFetch } from "@/lib/apiClient";
 
 const Login = () => {
-  // Simple hash function for passwords
-  const hashPassword = async (password: string): Promise<string> => {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(password + 'devops-ai-sentinel-secret-key');
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  };
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -27,7 +19,7 @@ const Login = () => {
   const [setupStep, setSetupStep] = useState(1);
   const [setupData, setSetupData] = useState({
     adminUsername: "admin",
-    adminPassword: "admin",
+    adminPassword: "",
     adminEmail: "admin@devops-ai-sentinel.local",
     adminFullName: "System Administrator",
     systemName: "DevOps AI Sentinel",
@@ -44,37 +36,27 @@ const Login = () => {
   const [rememberMe, setRememberMe] = useState(false);
 
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   useEffect(() => {
+    const sso = searchParams.get('sso');
+    if (sso) {
+      void apiFetch<{ user: Parameters<typeof authService.applySsoToken>[1] }>('/auth/me', {
+        headers: { Authorization: `Bearer ${sso}` },
+      }).then((data) => {
+        if (data.user) {
+          authService.applySsoToken(sso, data.user as never);
+          navigate('/', { replace: true });
+        }
+      }).catch(() => setError('SSO login failed'));
+      return;
+    }
     checkFirstTimeSetup();
-  }, []);
+  }, [searchParams, navigate]);
 
   const checkFirstTimeSetup = async () => {
     try {
-      // Check localStorage first for users
-      const localUsers = JSON.parse(localStorage.getItem('users') || '[]');
-      console.log('Found users in localStorage:', localUsers);
-      
-      if (localUsers.length === 0) {
-        // Also check advancedDatabase as fallback
-        try {
-          const dbUsers = await advancedDatabase.getMetric('users') || [];
-          console.log('Found users in database:', dbUsers);
-          if (Array.isArray(dbUsers) && dbUsers.length === 0) {
-            console.log('No users found anywhere, showing setup wizard');
-            setIsFirstTimeSetup(true);
-          } else {
-            console.log('Users found in database, showing login form');
-            setIsFirstTimeSetup(false);
-          }
-        } catch (dbError) {
-          console.log('Database check failed, showing setup wizard');
-          setIsFirstTimeSetup(true);
-        }
-      } else {
-        console.log('Users found in localStorage, showing login form');
-        setIsFirstTimeSetup(false);
-      }
+      setIsFirstTimeSetup(await authService.needsSetup());
     } catch (error) {
       console.error('Failed to check first-time setup:', error);
       setIsFirstTimeSetup(true);
@@ -83,13 +65,11 @@ const Login = () => {
 
   const clearDataAndReset = async () => {
     try {
-      // Clear localStorage to force first-time setup
-      localStorage.clear();
-      console.log('Data cleared, resetting to first-time setup');
-      setIsFirstTimeSetup(true);
+      await authService.logout();
+      setIsFirstTimeSetup(await authService.needsSetup());
       setError('');
     } catch (error) {
-      console.error('Failed to clear data:', error);
+      console.error('Failed to reset system:', error);
       setError('Failed to reset system');
     }
   };
@@ -121,71 +101,21 @@ const Login = () => {
     setError("");
 
     try {
-      // Create admin user directly in localStorage for now
-      const adminUser = {
-        id: `user-${Date.now()}`,
-        username: setupData.adminUsername,
-        email: setupData.adminEmail,
-        fullName: setupData.adminFullName,
-        role: 'admin' as const,
-        permissions: [
-          'user:read', 'user:write', 'user:delete',
-          'system:read', 'system:write', 'system:delete',
-          'monitoring:read', 'monitoring:write',
-          'alerts:read', 'alerts:write',
-          'settings:read', 'settings:write',
-          'logs:read', 'logs:write'
-        ],
-        passwordHash: await hashPassword(setupData.adminPassword),
-        isActive: true,
-        lastLogin: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        failedLoginAttempts: 0,
-        lockedUntil: null
-      };
-
-      console.log('Created admin user:', adminUser);
-
-      // Save user to localStorage
-      const existingUsers = JSON.parse(localStorage.getItem('users') || '[]');
-      existingUsers.push(adminUser);
-      localStorage.setItem('users', JSON.stringify(existingUsers));
-      console.log('Saved user to localStorage, total users:', existingUsers.length);
-
-      // Store system configuration in localStorage
-      localStorage.setItem('system_config', JSON.stringify({
+      const response = await authService.completeSetup({
+        adminUsername: setupData.adminUsername,
+        adminPassword: setupData.adminPassword,
+        adminEmail: setupData.adminEmail,
+        adminFullName: setupData.adminFullName,
         systemName: setupData.systemName,
         companyName: setupData.companyName,
-        timezone: setupData.timezone,
-        databaseType: setupData.databaseType,
-        setupCompleted: true,
-        setupDate: new Date().toISOString()
-      }));
-
-      // Auto-login with admin credentials
-      try {
-        const response = await authService.login({ 
-          username: setupData.adminUsername, 
-          password: setupData.adminPassword,
-          rememberMe: false
-        });
-
-        if (response.success) {
-          console.log('Setup completed successfully, redirecting to dashboard');
-          navigate('/', { replace: true });
-        } else {
-          setError('Setup completed but auto-login failed. Please login manually.');
-          setIsFirstTimeSetup(false);
-        }
-      } catch (loginError) {
-        console.error('Auto-login error:', loginError);
-        setError('Setup completed but auto-login failed. Please login manually.');
-        setIsFirstTimeSetup(false);
+      });
+      if (response.success) {
+        navigate('/', { replace: true });
+      } else {
+        setError(response.message || 'Setup failed. Please try again.');
       }
-
     } catch (error) {
-      setError('Setup failed. Please try again.');
+      setError(error instanceof Error ? error.message : 'Setup failed. Please try again.');
       console.error('Setup error:', error);
     } finally {
       setIsLoading(false);

@@ -5,69 +5,52 @@ import { cn } from "@/lib/utils";
 import WebSocketService from "@/services/websocket";
 import { Pipeline, PipelineStep } from "@/types/metrics";
 import { Progress } from "./ui/progress";
+import { apiFetch } from "@/lib/apiClient";
 
-const initialPipeline: Pipeline = {
+const idlePipeline: Pipeline = {
   id: "1",
-  name: "Main Deployment",
-  status: "running",
+  name: "CI Pipeline",
+  status: "completed",
   startTime: new Date().toISOString(),
-  trigger: "automated",
+  trigger: "manual",
   branch: "main",
-  commit: "abc123",
-  steps: [
-    {
-      id: "1",
-      name: "Build",
-      status: "completed",
-      duration: "5m",
-      startTime: new Date(Date.now() - 900000).toISOString(),
-      endTime: new Date(Date.now() - 600000).toISOString(),
-      resources: {
-        cpu: "2 cores",
-        memory: "4GB",
-        storage: "1GB"
-      }
-    },
-    {
-      id: "2",
-      name: "Test",
-      status: "completed",
-      duration: "10m",
-      startTime: new Date(Date.now() - 600000).toISOString(),
-      endTime: new Date(Date.now() - 300000).toISOString(),
-      resources: {
-        cpu: "4 cores",
-        memory: "8GB",
-        storage: "2GB"
-      }
-    },
-    {
-      id: "3",
-      name: "Deploy",
-      status: "in-progress",
-      duration: "15m",
-      startTime: new Date(Date.now() - 300000).toISOString(),
-      resources: {
-        cpu: "2 cores",
-        memory: "4GB",
-        storage: "5GB"
-      }
-    }
-  ]
+  commit: "n/a",
+  steps: [],
 };
 
 export function PipelineStatus() {
-  const [pipeline, setPipeline] = useState<Pipeline>(initialPipeline);
-  const [progress, setProgress] = useState(66);
+  const [pipeline, setPipeline] = useState<Pipeline>(idlePipeline);
+  const [progress, setProgress] = useState(0);
 
   useEffect(() => {
+    const load = async () => {
+      try {
+        const data = await apiFetch<{ metrics: Array<{ name: string; value: number }> }>('/metrics/latest');
+        const jobs = data.metrics?.find((m) => m.name === 'jenkins_jobs')?.value || 0;
+        const failing = data.metrics?.find((m) => m.name === 'jenkins_failing')?.value || 0;
+        if (jobs > 0) {
+          setPipeline({
+            ...idlePipeline,
+            name: 'Jenkins',
+            status: failing > 0 ? 'failed' : 'completed',
+            steps: [
+              { id: '1', name: 'Jobs', status: 'completed', duration: `${jobs}`, startTime: new Date().toISOString(), endTime: new Date().toISOString(), resources: { cpu: 'n/a', memory: 'n/a', storage: 'n/a' } },
+            ],
+          });
+          setProgress(failing > 0 ? 50 : 100);
+        }
+      } catch (error) {
+        console.error('Failed to load pipeline status', error);
+      }
+    };
+    void load();
     const ws = WebSocketService.getInstance();
     
     const handlePipelineUpdate = (data: Pipeline) => {
       setPipeline(data);
       // Calculate overall progress
       const completed = data.steps.filter(step => step.status === "completed").length;
-      const total = data.steps.length;
+      const total = data.steps.length || 1;
       setProgress((completed / total) * 100);
     };
 

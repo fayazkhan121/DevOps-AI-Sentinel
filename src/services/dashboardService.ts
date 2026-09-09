@@ -1,4 +1,4 @@
-import { advancedDatabase } from './advancedDatabase';
+import { apiFetch } from '@/lib/apiClient';
 
 export interface DashboardWidget {
   id: string;
@@ -257,41 +257,35 @@ export class DashboardService {
 
   private async loadDashboards() {
     try {
-      // Try localStorage first
-      const storedDashboards = localStorage.getItem('dashboards');
-      if (storedDashboards) {
-        const dashboards = JSON.parse(storedDashboards);
-        dashboards.forEach((dashboard: Dashboard) => {
-          this.dashboards.set(dashboard.id, dashboard);
+      const data = await apiFetch<{ dashboards: Dashboard[] }>('/dashboards');
+      (data.dashboards || []).forEach((dashboard) => {
+        this.dashboards.set(dashboard.id, {
+          ...dashboard,
+          viewCount: dashboard.viewCount || 0,
+          favoriteCount: dashboard.favoriteCount || 0,
+          isTemplate: dashboard.isTemplate || false,
+          ownerId: dashboard.ownerId || '',
         });
-      }
-
-      // Also try to load from advancedDatabase
-      try {
-        const dbDashboards = await advancedDatabase.getMetric('dashboards') || [];
-        dbDashboards.forEach((dashboard: Dashboard) => {
-          this.dashboards.set(dashboard.id, dashboard);
-        });
-      } catch (error) {
-        console.error('Failed to load dashboards from database:', error);
-      }
+      });
     } catch (error) {
       console.error('Failed to load dashboards:', error);
     }
   }
 
   async createDashboard(data: Omit<Dashboard, 'id' | 'createdAt' | 'updatedAt' | 'viewCount' | 'favoriteCount'>): Promise<string> {
+    const created = await apiFetch<{ id: string }>('/dashboards', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
     const dashboard: Dashboard = {
       ...data,
-      id: `dashboard-${Date.now()}`,
+      id: created.id,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       viewCount: 0,
       favoriteCount: 0
     };
-
     this.dashboards.set(dashboard.id, dashboard);
-    await this.saveDashboards();
     return dashboard.id;
   }
 
@@ -443,18 +437,18 @@ export class DashboardService {
   }
 
   private async saveDashboards() {
-    try {
-      const dashboardsArray = Array.from(this.dashboards.values());
-      localStorage.setItem('dashboards', JSON.stringify(dashboardsArray));
-    } catch (error) {
-      console.error('Failed to save dashboards to localStorage:', error);
-    }
-
-    try {
-      const dashboardsArray = Array.from(this.dashboards.values());
-      await advancedDatabase.saveMetric('dashboards', dashboardsArray);
-    } catch (error) {
-      console.error('Failed to save dashboards to database:', error);
+    for (const dashboard of this.dashboards.values()) {
+      try {
+        await apiFetch(`/dashboards/${dashboard.id}`, {
+          method: 'PUT',
+          body: JSON.stringify(dashboard),
+        });
+      } catch {
+        await apiFetch('/dashboards', {
+          method: 'POST',
+          body: JSON.stringify(dashboard),
+        }).catch((error) => console.error('Failed to save dashboard', error));
+      }
     }
   }
 

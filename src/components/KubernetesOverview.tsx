@@ -1,6 +1,8 @@
 import { Check, Server, AlertTriangle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { Progress } from "./ui/progress";
+import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/apiClient";
 
 interface WorkerNode {
   name: string;
@@ -16,49 +18,47 @@ interface WorkerNode {
   };
 }
 
-const workers: WorkerNode[] = [
-  {
-    name: "worker-1",
-    cpu: "65%",
-    cpuPercentage: 65,
-    memory: "70%",
-    memoryPercentage: 70,
-    pods: 8,
-    status: "healthy",
-    network: {
-      in: "1.2 GB/s",
-      out: "856 MB/s"
-    }
-  },
-  {
-    name: "worker-2",
-    cpu: "45%",
-    cpuPercentage: 45,
-    memory: "60%",
-    memoryPercentage: 60,
-    pods: 6,
-    status: "healthy",
-    network: {
-      in: "980 MB/s",
-      out: "750 MB/s"
-    }
-  },
-  {
-    name: "worker-3",
-    cpu: "85%",
-    cpuPercentage: 85,
-    memory: "90%",
-    memoryPercentage: 90,
-    pods: 12,
-    status: "warning",
-    network: {
-      in: "2.1 GB/s",
-      out: "1.8 GB/s"
-    }
-  }
-];
-
 export function KubernetesOverview() {
+  const [workers, setWorkers] = useState<WorkerNode[]>([]);
+  const [counts, setCounts] = useState({ nodes: 0, pods: 0, namespaces: 0, deployments: 0 });
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const data = await apiFetch<{ metrics: Array<{ name: string; value: number; source: string }> }>('/metrics/latest');
+        const get = (name: string) => data.metrics?.find((m) => m.name === name)?.value || 0;
+        const cpu = get('cpu_usage');
+        const mem = get('memory_usage');
+        const nodes = get('k8s_node_count');
+        const pods = get('k8s_pod_count');
+        setCounts({
+          nodes: nodes || 1,
+          pods: pods || 0,
+          namespaces: pods ? 1 : 0,
+          deployments: pods ? 1 : 0,
+        });
+        setWorkers([{
+          name: 'sentinel-host',
+          cpu: `${cpu}%`,
+          cpuPercentage: cpu,
+          memory: `${mem}%`,
+          memoryPercentage: mem,
+          pods: pods || 0,
+          status: cpu > 90 || mem > 90 ? 'critical' : cpu > 70 || mem > 80 ? 'warning' : 'healthy',
+          network: {
+            in: `${get('network_in_kb')} KB`,
+            out: `${get('network_out_kb')} KB`,
+          },
+        }]);
+      } catch (error) {
+        console.error('Failed to load infrastructure overview', error);
+      }
+    };
+    void load();
+    const timer = setInterval(() => void load(), 15000);
+    return () => clearInterval(timer);
+  }, []);
+
   return (
     <Card className="col-span-full">
       <CardHeader className="flex flex-row items-center justify-between">
@@ -70,19 +70,19 @@ export function KubernetesOverview() {
       <CardContent>
         <div className="grid grid-cols-4 gap-4 text-center mb-6">
           <div>
-            <div className="text-2xl font-bold">5</div>
+            <div className="text-2xl font-bold">{counts.nodes}</div>
             <div className="text-xs text-muted-foreground">Nodes</div>
           </div>
           <div>
-            <div className="text-2xl font-bold">25</div>
+            <div className="text-2xl font-bold">{counts.pods}</div>
             <div className="text-xs text-muted-foreground">Pods</div>
           </div>
           <div>
-            <div className="text-2xl font-bold">4</div>
+            <div className="text-2xl font-bold">{counts.namespaces}</div>
             <div className="text-xs text-muted-foreground">Namespaces</div>
           </div>
           <div>
-            <div className="text-2xl font-bold">8</div>
+            <div className="text-2xl font-bold">{counts.deployments}</div>
             <div className="text-xs text-muted-foreground">Deployments</div>
           </div>
         </div>

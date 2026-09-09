@@ -52,9 +52,9 @@ const DatabaseSettings = () => {
     }
   };
 
-  const loadBackups = () => {
+  const loadBackups = async () => {
     try {
-      const storedBackups = JSON.parse(localStorage.getItem('database_backups') || '[]');
+      const storedBackups = await databaseManager.listBackups();
       setBackups(storedBackups);
     } catch (error) {
       console.error('Failed to load backups:', error);

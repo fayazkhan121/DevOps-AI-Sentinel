@@ -202,6 +202,14 @@ CREATE TABLE IF NOT EXISTS oauth_states (
   state TEXT PRIMARY KEY,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS db_backups (
+  id TEXT PRIMARY KEY,
+  org_id TEXT,
+  connection_id TEXT,
+  created_at TEXT NOT NULL,
+  note TEXT
+);
 `;
 
 let adapter: DbAdapter | null = null;

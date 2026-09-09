@@ -21,7 +21,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { IntegrationConfigForm } from "./IntegrationConfigForm";
 import { INTEGRATION_CONFIGS } from "@/lib/integrationConfigs";
 import { IntegrationConfig, IntegrationCredentials } from "@/types/integrations";
-import { saveSettings, getSettings } from "@/services/localDb";
+import { apiFetch } from "@/lib/apiClient";
 import { useToast } from "@/components/ui/use-toast";
 
 interface IntegrationCardProps {
@@ -66,23 +66,20 @@ export function IntegrationsSettings() {
     const loadIntegrations = async () => {
       try {
         setIsLoading(true);
-        const savedIntegrations = await getSettings('integrations');
-        console.log('Loaded integrations:', savedIntegrations);
-        
-        if (savedIntegrations) {
-          // Merge saved integrations with their config to get the icon
-          const mergedIntegrations = savedIntegrations.map((saved: IntegrationConfig) => {
-            const config = INTEGRATION_CONFIGS.find(c => c.id === saved.id);
+        const data = await apiFetch<{ integrations: Array<{ id: string; type: string; name: string; status: string }> }>('/integrations');
+        const mergedIntegrations = (data.integrations || [])
+          .map((row) => {
+            const config = INTEGRATION_CONFIGS.find((c) => c.id === row.type);
+            if (!config) return null;
             return {
-              ...saved,
-              icon: config?.icon // Restore the icon from the config
-            };
-          });
-          setIntegrations(mergedIntegrations);
-        } else {
-          setIntegrations([]);
-          await saveSettings('integrations', []);
-        }
+              ...config,
+              id: row.type,
+              title: row.name || config.title,
+              connected: row.status === 'connected' || row.status === 'disconnected' || row.status === 'error',
+            } as IntegrationConfig;
+          })
+          .filter(Boolean) as IntegrationConfig[];
+        setIntegrations(mergedIntegrations);
       } catch (error) {
         console.error('Failed to load integrations:', error);
         toast({
@@ -107,45 +104,18 @@ export function IntegrationsSettings() {
     if (!selectedIntegration) return;
 
     try {
-      console.log('Configuring integration:', selectedIntegration.id, 'with credentials:', credentials);
-      
-      // Create new integration object without the icon
-      const { icon, ...integrationWithoutIcon } = selectedIntegration;
-      const newIntegration = {
-        ...integrationWithoutIcon,
-        connected: true,
-        credentials
-      };
-
-      // Get current integrations without icons
-      const currentIntegrations = (await getSettings('integrations') || []).map(
-        (integration: IntegrationConfig) => {
-          const { icon, ...rest } = integration;
-          return rest;
-        }
-      );
-
-      // Remove existing integration if it exists
-      const updatedIntegrations = currentIntegrations.filter(
-        (i: IntegrationConfig) => i.id !== selectedIntegration.id
-      );
-
-      // Add new integration
-      updatedIntegrations.push(newIntegration);
-
-      // Save to storage (without icons)
-      await saveSettings('integrations', updatedIntegrations);
-      
-      // Update state (with icons)
-      const mergedIntegrations = updatedIntegrations.map((saved: IntegrationConfig) => {
-        const config = INTEGRATION_CONFIGS.find(c => c.id === saved.id);
-        return {
-          ...saved,
-          icon: config?.icon
-        };
+      await apiFetch('/integrations', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: selectedIntegration.id,
+          name: selectedIntegration.title,
+          config: credentials,
+        }),
       });
-      
-      setIntegrations(mergedIntegrations);
+
+      const updated = integrations.filter((i) => i.id !== selectedIntegration.id);
+      updated.push({ ...selectedIntegration, connected: true });
+      setIntegrations(updated);
       setSelectedIntegration(null);
       setIsConfiguring(false);
 
@@ -160,26 +130,19 @@ export function IntegrationsSettings() {
         description: "Failed to save your integration. Please try again.",
         variant: "destructive",
       });
+      throw error;
     }
   };
 
   const handleDisconnect = async (integrationId: string) => {
     try {
-      console.log('Disconnecting integration:', integrationId);
-      
-      // Get current integrations
-      const currentIntegrations = await getSettings('integrations') || [];
-      
-      // Filter out the integration to disconnect
-      const updatedIntegrations = currentIntegrations.filter(
-        (i: IntegrationConfig) => i.id !== integrationId
-      );
+      const data = await apiFetch<{ integrations: Array<{ id: string; type: string }> }>('/integrations');
+      const row = (data.integrations || []).find((i) => i.type === integrationId || i.id === integrationId);
+      if (row) {
+        await apiFetch(`/integrations/${row.id}`, { method: 'DELETE' });
+      }
 
-      // Save to storage
-      await saveSettings('integrations', updatedIntegrations);
-      
-      // Update state
-      setIntegrations(updatedIntegrations);
+      setIntegrations(integrations.filter((i) => i.id !== integrationId));
       
       toast({
         title: "Integration Removed",

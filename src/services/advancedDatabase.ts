@@ -44,15 +44,31 @@ export class AdvancedDatabaseService {
   }
 
   getConnectionStatus(): DatabaseConnection {
-    return { ...this.connection, isConnected: true, type: 'sqlite' };
+    return { ...this.connection };
   }
 
-  async testConnection(): Promise<boolean> {
+  async testConnection(config?: { type?: string; host?: string; port?: number; username?: string; password?: string; database?: string; ssl?: boolean; connectionString?: string }): Promise<boolean> {
     try {
-      await apiFetch('/health');
-      this.connection.isConnected = true;
+      const type = config?.type && config.type !== 'indexeddb' && config.type !== 'localStorage' && config.type !== 'memory'
+        ? config.type
+        : 'sqlite';
+      const result = await apiFetch<{ success: boolean }>('/databases/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          type,
+          host: config?.host,
+          port: config?.port != null ? String(config.port) : undefined,
+          username: config?.username,
+          password: config?.password,
+          database: config?.database,
+          ssl: config?.ssl ? 'true' : 'false',
+          connectionString: config?.connectionString,
+        }),
+      });
+      this.connection.isConnected = result.success;
+      this.connection.type = type;
       this.connection.lastConnected = new Date();
-      return true;
+      return result.success;
     } catch {
       this.connection.isConnected = false;
       return false;

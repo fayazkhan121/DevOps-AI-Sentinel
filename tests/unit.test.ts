@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { encryptString, decryptString, encryptJson, decryptJson, ipv4InCidr, sha256 } from '../server/crypto.ts';
 import { detectValueAnomalies, evaluateCondition, clusterLogs, zScore } from '../server/anomaly.ts';
+import { normalizeIntegrationConfig } from '../server/collectors.ts';
 
 test('AES-256-GCM round trip', () => {
   const secret = 'unit-test-encryption-key-32ch';
@@ -45,4 +46,19 @@ test('log clustering', () => {
   const clusters = clusterLogs(['error code 12', 'error code 99', 'all good']);
   assert.ok(clusters.length >= 1);
   assert.ok(clusters.some((c) => c.count >= 2));
+});
+
+test('normalizes AWS and Jenkins integration form fields', () => {
+  const aws = normalizeIntegrationConfig('aws', {
+    aws_access_key_id: 'AKIATEST',
+    aws_secret_access_key: 'secret',
+    aws_region: 'us-west-2',
+  });
+  assert.equal(aws.accessKeyId, 'AKIATEST');
+  assert.equal(aws.secretAccessKey, 'secret');
+  assert.equal(aws.region, 'us-west-2');
+
+  const jenkins = normalizeIntegrationConfig('jenkins', { token: 'abc', url: 'http://jenkins' });
+  assert.equal(jenkins.apiToken, 'abc');
+  assert.equal(jenkins.token, 'abc');
 });

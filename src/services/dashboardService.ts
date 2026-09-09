@@ -1,4 +1,5 @@
 import { apiFetch } from '@/lib/apiClient';
+import { metricsService } from './metricsService';
 
 export interface DashboardWidget {
   id: string;
@@ -429,8 +430,15 @@ export class DashboardService {
   async toggleFavorite(dashboardId: string): Promise<void> {
     const dashboard = this.dashboards.get(dashboardId);
     if (dashboard) {
-      // This is a simple toggle - in a real app you'd track individual user favorites
-      dashboard.favoriteCount = Math.max(0, dashboard.favoriteCount + (Math.random() > 0.5 ? 1 : -1));
+      const key = `fav-${dashboardId}`;
+      const favorited = sessionStorage.getItem(key) === '1';
+      if (favorited) {
+        dashboard.favoriteCount = Math.max(0, dashboard.favoriteCount - 1);
+        sessionStorage.removeItem(key);
+      } else {
+        dashboard.favoriteCount += 1;
+        sessionStorage.setItem(key, '1');
+      }
       this.dashboards.set(dashboardId, dashboard);
       await this.saveDashboards();
     }
@@ -454,45 +462,45 @@ export class DashboardService {
 
   // Generate sample data for widgets
   async generateSampleData(widget: DashboardWidget): Promise<any> {
+    await metricsService.refresh().catch(() => undefined);
+    const sys = metricsService.generateSystemMetrics();
     const now = new Date();
-    const dataPoints = 24; // 24 hours of data
 
     switch (widget.type) {
       case 'metric':
         return {
-          value: Math.floor(Math.random() * 100),
+          value: Math.round(sys.cpuUsage),
           unit: '%',
-          trend: Math.random() > 0.5 ? 'up' : 'down',
-          change: Math.floor(Math.random() * 20)
+          trend: sys.cpuUsage >= sys.memoryUsage ? 'up' : 'down',
+          change: Math.round(Math.abs(sys.cpuUsage - sys.memoryUsage))
         };
 
       case 'chart': {
-        const data = [];
-        for (let i = dataPoints - 1; i >= 0; i--) {
-          const timestamp = new Date(now.getTime() - i * 60 * 60 * 1000);
-          data.push({
-            timestamp: timestamp.toISOString(),
-            value: Math.floor(Math.random() * 100)
-          });
+        const hist = await apiFetch<{ metrics: Array<{ name: string; value: number; timestamp: string }> }>('/metrics?name=cpu_usage&hours=24').catch(() => ({ metrics: [] as Array<{ name: string; value: number; timestamp: string }> }));
+        const rows = hist.metrics || [];
+        if (rows.length === 0) {
+          return [{ timestamp: now.toISOString(), value: Math.round(sys.cpuUsage) }];
         }
-        return data;
+        return rows.map((row) => ({ timestamp: row.timestamp, value: row.value }));
       }
 
-      case 'table':
-        return [
-          { id: 1, name: 'Service A', status: 'healthy', responseTime: '45ms', uptime: '99.9%' },
-          { id: 2, name: 'Service B', status: 'warning', responseTime: '120ms', uptime: '98.5%' },
-          { id: 3, name: 'Service C', status: 'critical', responseTime: '500ms', uptime: '95.2%' },
-          { id: 4, name: 'Service D', status: 'healthy', responseTime: '67ms', uptime: '99.7%' }
-        ];
+      case 'table': {
+        const latest = await apiFetch<{ metrics: Array<{ name: string; value: number; source: string; unit: string }> }>('/metrics/latest').catch(() => ({ metrics: [] as Array<{ name: string; value: number; source: string; unit: string }> }));
+        return (latest.metrics || []).slice(0, 8).map((m, i) => ({
+          id: i + 1,
+          name: m.name,
+          status: m.source,
+          responseTime: `${m.value}${m.unit || ''}`,
+          uptime: m.source,
+        }));
+      }
 
       case 'status':
-        return [
-          { service: 'Web Server', status: 'healthy', lastCheck: '2 minutes ago' },
-          { service: 'Database', status: 'healthy', lastCheck: '1 minute ago' },
-          { service: 'Cache', status: 'warning', lastCheck: '30 seconds ago' },
-          { service: 'Load Balancer', status: 'healthy', lastCheck: '5 minutes ago' }
-        ];
+        return metricsService.generateServiceMetrics().map((svc) => ({
+          service: svc.name,
+          status: svc.status,
+          lastCheck: svc.lastCheck,
+        }));
 
       default:
         return null;

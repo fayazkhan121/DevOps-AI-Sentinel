@@ -1,4 +1,4 @@
-import { PlatformMetric, AlertRule, EmailAlert, Integration, CloudProvider } from '../types';
+import { apiFetch } from '@/lib/apiClient';
 
 export interface DatabaseConnection {
   id: string;
@@ -16,26 +16,27 @@ export interface DatabaseConnection {
   isActive: boolean;
   lastConnected?: string;
   error?: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface DatabaseQuery {
   query: string;
-  params?: any[];
+  params?: unknown[];
   timeout?: number;
 }
 
 export interface DatabaseResult {
   success: boolean;
-  data?: any;
+  data?: unknown;
   error?: string;
   rowsAffected?: number;
   executionTime?: number;
 }
 
+const DB_INTEGRATION_TYPES = new Set(['postgresql', 'mysql', 'mongodb', 'redis', 'sqlite']);
+
 export class DatabaseManager {
   private connections: Map<string, DatabaseConnection> = new Map();
-  private activeConnections: Map<string, any> = new Map();
   private defaultConnection: string = 'local';
 
   constructor() {
@@ -43,47 +44,63 @@ export class DatabaseManager {
   }
 
   private initializeDefaultConnections() {
-    // Local storage connection (always available)
-    const localConnection: DatabaseConnection = {
+    this.connections.set('local', {
       id: 'local',
       name: 'Local Storage',
       type: 'localStorage',
       isActive: true,
-      lastConnected: new Date().toISOString()
-    };
-
-    // IndexedDB connection (always available)
-    const indexedDBConnection: DatabaseConnection = {
+      lastConnected: new Date().toISOString(),
+    });
+    this.connections.set('indexeddb', {
       id: 'indexeddb',
       name: 'IndexedDB',
       type: 'indexeddb',
       isActive: true,
-      lastConnected: new Date().toISOString()
-    };
+      lastConnected: new Date().toISOString(),
+    });
+  }
 
-    this.connections.set('local', localConnection);
-    this.connections.set('indexeddb', indexedDBConnection);
+  private async refreshFromApi(): Promise<void> {
+    const data = await apiFetch<{ integrations: Array<{ id: string; type: string; name: string; status: string; error?: string; last_sync?: string }> }>('/integrations');
+    for (const row of data.integrations || []) {
+      if (!DB_INTEGRATION_TYPES.has(row.type)) continue;
+      this.connections.set(row.id, {
+        id: row.id,
+        name: row.name,
+        type: row.type as DatabaseConnection['type'],
+        isActive: row.status === 'connected',
+        error: row.error,
+        lastConnected: row.last_sync,
+      });
+    }
   }
 
   async addConnection(connection: DatabaseConnection): Promise<boolean> {
     try {
-      // Test the connection first
       const testResult = await this.testConnection(connection);
-      if (testResult.success) {
-        connection.isActive = true;
-        connection.lastConnected = new Date().toISOString();
-        connection.error = undefined;
-      } else {
-        connection.isActive = false;
-        connection.error = testResult.error;
-      }
+      connection.isActive = testResult.success;
+      connection.lastConnected = testResult.success ? new Date().toISOString() : undefined;
+      connection.error = testResult.success ? undefined : testResult.error;
 
+      const saved = await apiFetch<{ id: string }>('/integrations', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: connection.type,
+          name: connection.name,
+          config: {
+            type: connection.type,
+            host: connection.host,
+            port: String(connection.port || ''),
+            username: connection.username,
+            password: connection.password,
+            database: connection.database,
+            ssl: connection.ssl ? 'true' : 'false',
+            connectionString: connection.connectionString,
+          },
+        }),
+      });
+      connection.id = saved.id;
       this.connections.set(connection.id, connection);
-      
-      // Save to localStorage
-      const connections = Array.from(this.connections.values());
-      localStorage.setItem('database_connections', JSON.stringify(connections));
-      
       return true;
     } catch (error) {
       console.error('Failed to add database connection:', error);
@@ -93,17 +110,11 @@ export class DatabaseManager {
 
   async removeConnection(connectionId: string): Promise<boolean> {
     try {
-      // Close active connection if exists
-      if (this.activeConnections.has(connectionId)) {
-        await this.closeConnection(connectionId);
+      if (connectionId === 'local' || connectionId === 'indexeddb') {
+        return false;
       }
-
+      await apiFetch(`/integrations/${connectionId}`, { method: 'DELETE' });
       this.connections.delete(connectionId);
-      
-      // Save to localStorage
-      const connections = Array.from(this.connections.values());
-      localStorage.setItem('database_connections', JSON.stringify(connections));
-      
       return true;
     } catch (error) {
       console.error('Failed to remove database connection:', error);
@@ -112,237 +123,45 @@ export class DatabaseManager {
   }
 
   async testConnection(connection: DatabaseConnection): Promise<DatabaseResult> {
+    const started = Date.now();
+    const type = connection.type === 'indexeddb' || connection.type === 'localStorage'
+      ? 'sqlite'
+      : connection.type;
     try {
-      switch (connection.type) {
-        case 'postgresql':
-          return await this.testPostgreSQLConnection(connection);
-        case 'mysql':
-          return await this.testMySQLConnection(connection);
-        case 'mongodb':
-          return await this.testMongoDBConnection(connection);
-        case 'redis':
-          return await this.testRedisConnection(connection);
-        case 'sqlite':
-          return await this.testSQLiteConnection(connection);
-        case 'indexeddb':
-        case 'localStorage':
-          return { success: true, data: 'Local storage always available' };
-        default:
-          return { success: false, error: 'Unsupported database type' };
-      }
-    } catch (error) {
-      return { success: false, error: `Connection test failed: ${error}` };
-    }
-  }
-
-  private async testPostgreSQLConnection(connection: DatabaseConnection): Promise<DatabaseResult> {
-    try {
-      // Simulate PostgreSQL connection test
-      // In a real implementation, you would use a library like 'pg'
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      if (connection.host && connection.port && connection.database) {
-        return { success: true, data: 'PostgreSQL connection successful' };
-      } else {
-        return { success: false, error: 'Missing required PostgreSQL connection parameters' };
-      }
-    } catch (error) {
-      return { success: false, error: `PostgreSQL test failed: ${error}` };
-    }
-  }
-
-  private async testMySQLConnection(connection: DatabaseConnection): Promise<DatabaseResult> {
-    try {
-      // Simulate MySQL connection test
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      if (connection.host && connection.port && connection.database) {
-        return { success: true, data: 'MySQL connection successful' };
-      } else {
-        return { success: false, error: 'Missing required MySQL connection parameters' };
-      }
-    } catch (error) {
-      return { success: false, error: `MySQL test failed: ${error}` };
-    }
-  }
-
-  private async testMongoDBConnection(connection: DatabaseConnection): Promise<DatabaseResult> {
-    try {
-      // Simulate MongoDB connection test
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      if (connection.connectionString || (connection.host && connection.port)) {
-        return { success: true, data: 'MongoDB connection successful' };
-      } else {
-        return { success: false, error: 'Missing required MongoDB connection parameters' };
-      }
-    } catch (error) {
-      return { success: false, error: `MongoDB test failed: ${error}` };
-    }
-  }
-
-  private async testRedisConnection(connection: DatabaseConnection): Promise<DatabaseResult> {
-    try {
-      // Simulate Redis connection test
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      if (connection.host && connection.port) {
-        return { success: true, data: 'Redis connection successful' };
-      } else {
-        return { success: false, error: 'Missing required Redis connection parameters' };
-      }
-    } catch (error) {
-      return { success: false, error: `Redis test failed: ${error}` };
-    }
-  }
-
-  private async testSQLiteConnection(connection: DatabaseConnection): Promise<DatabaseResult> {
-    try {
-      // Simulate SQLite connection test
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      if (connection.database) {
-        return { success: true, data: 'SQLite connection successful' };
-      } else {
-        return { success: false, error: 'Missing required SQLite database path' };
-      }
-    } catch (error) {
-      return { success: false, error: `SQLite test failed: ${error}` };
-    }
-  }
-
-  async executeQuery(connectionId: string, query: DatabaseQuery): Promise<DatabaseResult> {
-    try {
-      const connection = this.connections.get(connectionId);
-      if (!connection || !connection.isActive) {
-        return { success: false, error: 'Connection not available or inactive' };
-      }
-
-      const startTime = Date.now();
-      
-      switch (connection.type) {
-        case 'postgresql':
-          return await this.executePostgreSQLQuery(connection, query);
-        case 'mysql':
-          return await this.executeMySQLQuery(connection, query);
-        case 'mongodb':
-          return await this.executeMongoDBQuery(connection, query);
-        case 'redis':
-          return await this.executeRedisQuery(connection, query);
-        case 'sqlite':
-          return await this.executeSQLiteQuery(connection, query);
-        case 'indexeddb':
-          return await this.executeIndexedDBQuery(connection, query);
-        case 'localStorage':
-          return await this.executeLocalStorageQuery(connection, query);
-        default:
-          return { success: false, error: 'Unsupported database type' };
-      }
-    } catch (error) {
-      return { success: false, error: `Query execution failed: ${error}` };
-    }
-  }
-
-  private async executePostgreSQLQuery(connection: DatabaseConnection, query: DatabaseQuery): Promise<DatabaseResult> {
-    // Simulate PostgreSQL query execution
-    await new Promise(resolve => setTimeout(resolve, 50));
-    
-    return {
-      success: true,
-      data: [{ id: 1, message: 'PostgreSQL query executed successfully' }],
-      rowsAffected: 1,
-      executionTime: 50
-    };
-  }
-
-  private async executeMySQLQuery(connection: DatabaseConnection, query: DatabaseQuery): Promise<DatabaseResult> {
-    // Simulate MySQL query execution
-    await new Promise(resolve => setTimeout(resolve, 50));
-    
-    return {
-      success: true,
-      data: [{ id: 1, message: 'MySQL query executed successfully' }],
-      rowsAffected: 1,
-      executionTime: 50
-    };
-  }
-
-  private async executeMongoDBQuery(connection: DatabaseConnection, query: DatabaseQuery): Promise<DatabaseResult> {
-    // Simulate MongoDB query execution
-    await new Promise(resolve => setTimeout(resolve, 50));
-    
-    return {
-      success: true,
-      data: [{ _id: '1', message: 'MongoDB query executed successfully' }],
-      rowsAffected: 1,
-      executionTime: 50
-    };
-  }
-
-  private async executeRedisQuery(connection: DatabaseConnection, query: DatabaseQuery): Promise<DatabaseResult> {
-    // Simulate Redis query execution
-    await new Promise(resolve => setTimeout(resolve, 50));
-    
-    return {
-      success: true,
-      data: 'Redis operation completed successfully',
-      executionTime: 50
-    };
-  }
-
-  private async executeSQLiteQuery(connection: DatabaseConnection, query: DatabaseQuery): Promise<DatabaseResult> {
-    // Simulate SQLite query execution
-    await new Promise(resolve => setTimeout(resolve, 50));
-    
-    return {
-      success: true,
-      data: [{ id: 1, message: 'SQLite query executed successfully' }],
-      rowsAffected: 1,
-      executionTime: 50
-    };
-  }
-
-  private async executeIndexedDBQuery(connection: DatabaseConnection, query: DatabaseQuery): Promise<DatabaseResult> {
-    try {
-      // Simulate IndexedDB query execution
-      await new Promise(resolve => setTimeout(resolve, 50));
-      
+      const result = await apiFetch<{ success: boolean; message: string; latencyMs: number }>('/databases/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          type,
+          host: connection.host,
+          port: String(connection.port || ''),
+          username: connection.username,
+          password: connection.password,
+          database: connection.database,
+          ssl: String(!!connection.ssl),
+          connectionString: connection.connectionString,
+        }),
+      });
       return {
-        success: true,
-        data: [{ id: 1, message: 'IndexedDB query executed successfully' }],
-        executionTime: 50
+        success: result.success,
+        data: result.message,
+        executionTime: result.latencyMs ?? Date.now() - started,
       };
     } catch (error) {
-      return { success: false, error: `IndexedDB query failed: ${error}` };
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Connection test failed',
+        executionTime: Date.now() - started,
+      };
     }
   }
 
-  private async executeLocalStorageQuery(connection: DatabaseConnection, query: DatabaseQuery): Promise<DatabaseResult> {
-    try {
-      // Simulate localStorage query execution
-      await new Promise(resolve => setTimeout(resolve, 50));
-      
-      return {
-        success: true,
-        data: [{ id: 1, message: 'localStorage query executed successfully' }],
-        executionTime: 50
-      };
-    } catch (error) {
-      return { success: false, error: `localStorage query failed: ${error}` };
-    }
+  async executeQuery(_connectionId: string, _query: DatabaseQuery): Promise<DatabaseResult> {
+    return { success: false, error: 'Ad-hoc queries against remote databases are not enabled' };
   }
 
   async closeConnection(connectionId: string): Promise<boolean> {
-    try {
-      if (this.activeConnections.has(connectionId)) {
-        // In a real implementation, you would close the actual database connection
-        this.activeConnections.delete(connectionId);
-      }
-      return true;
-    } catch (error) {
-      console.error('Failed to close connection:', error);
-      return false;
-    }
+    this.connections.delete(connectionId);
+    return true;
   }
 
   async getConnectionStatus(connectionId: string): Promise<DatabaseConnection | null> {
@@ -350,11 +169,16 @@ export class DatabaseManager {
   }
 
   async getAllConnections(): Promise<DatabaseConnection[]> {
+    try {
+      await this.refreshFromApi();
+    } catch {
+      // Keep built-in local connections if the API is unreachable.
+    }
     return Array.from(this.connections.values());
   }
 
   async setDefaultConnection(connectionId: string): Promise<boolean> {
-    if (this.connections.has(connectionId)) {
+    if (this.connections.has(connectionId) || connectionId === 'local' || connectionId === 'indexeddb') {
       this.defaultConnection = connectionId;
       localStorage.setItem('default_database_connection', connectionId);
       return true;
@@ -363,113 +187,59 @@ export class DatabaseManager {
   }
 
   getDefaultConnection(): string {
-    return this.defaultConnection;
+    return localStorage.getItem('default_database_connection') || this.defaultConnection;
   }
 
-  async migrateData(sourceConnectionId: string, targetConnectionId: string): Promise<DatabaseResult> {
-    try {
-      const sourceConnection = this.connections.get(sourceConnectionId);
-      const targetConnection = this.connections.get(targetConnectionId);
-
-      if (!sourceConnection || !targetConnection) {
-        return { success: false, error: 'Source or target connection not found' };
-      }
-
-      // Simulate data migration
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      return {
-        success: true,
-        data: `Data migrated successfully from ${sourceConnection.name} to ${targetConnection.name}`,
-        executionTime: 2000
-      };
-    } catch (error) {
-      return { success: false, error: `Migration failed: ${error}` };
-    }
+  async migrateData(_sourceConnectionId: string, _targetConnectionId: string): Promise<DatabaseResult> {
+    return { success: false, error: 'Cross-database migration is not supported' };
   }
 
   async backupDatabase(connectionId: string): Promise<DatabaseResult> {
     try {
-      const connection = this.connections.get(connectionId);
-      if (!connection) {
-        return { success: false, error: 'Connection not found' };
-      }
-
-      // Simulate database backup
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const backupData = {
-        connectionId,
-        timestamp: new Date().toISOString(),
-        type: connection.type,
-        data: 'Simulated backup data'
-      };
-
-      // Save backup to localStorage
-      const backups = JSON.parse(localStorage.getItem('database_backups') || '[]');
-      backups.push(backupData);
-      localStorage.setItem('database_backups', JSON.stringify(backups));
-      
-      return {
-        success: true,
-        data: backupData,
-        executionTime: 1000
-      };
+      const created = await apiFetch<{ id: string; createdAt: string }>('/backups', {
+        method: 'POST',
+        body: JSON.stringify({ connectionId }),
+      });
+      return { success: true, data: created };
     } catch (error) {
-      return { success: false, error: `Backup failed: ${error}` };
+      return { success: false, error: error instanceof Error ? error.message : 'Backup failed' };
     }
   }
 
-  async restoreDatabase(connectionId: string, backupId: string): Promise<DatabaseResult> {
-    try {
-      const connection = this.connections.get(connectionId);
-      if (!connection) {
-        return { success: false, error: 'Connection not found' };
-      }
+  async restoreDatabase(_connectionId: string, _backupId: string): Promise<DatabaseResult> {
+    return { success: false, error: 'Restore is not supported for SQLite metadata snapshots' };
+  }
 
-      // Simulate database restore
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      return {
-        success: true,
-        data: `Database restored successfully from backup ${backupId}`,
-        executionTime: 1500
-      };
-    } catch (error) {
-      return { success: false, error: `Restore failed: ${error}` };
+  async listBackups(): Promise<unknown[]> {
+    try {
+      const data = await apiFetch<{ backups: unknown[] }>('/backups');
+      return data.backups || [];
+    } catch {
+      return [];
     }
   }
 
   async getDatabaseMetrics(connectionId: string): Promise<DatabaseResult> {
     try {
-      const connection = this.connections.get(connectionId);
-      if (!connection) {
-        return { success: false, error: 'Connection not found' };
-      }
-
-      // Simulate database metrics collection
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      const metrics = {
-        connectionId,
-        timestamp: new Date().toISOString(),
-        type: connection.type,
-        status: connection.isActive ? 'active' : 'inactive',
-        lastConnected: connection.lastConnected,
-        performance: {
-          avgQueryTime: Math.random() * 100,
-          activeConnections: Math.floor(Math.random() * 10),
-          totalQueries: Math.floor(Math.random() * 1000)
-        }
-      };
-      
+      const data = await apiFetch<{ metrics: Array<{ name: string; value: number; source: string }> }>('/metrics/latest');
+      const related = (data.metrics || []).filter((m) => m.name.startsWith('db_') || m.source === this.connections.get(connectionId)?.type);
       return {
         success: true,
-        data: metrics,
-        executionTime: 100
+        data: {
+          connectionId,
+          timestamp: new Date().toISOString(),
+          type: this.connections.get(connectionId)?.type,
+          status: this.connections.get(connectionId)?.isActive ? 'active' : 'inactive',
+          lastConnected: this.connections.get(connectionId)?.lastConnected,
+          performance: {
+            avgQueryTime: related.find((m) => m.name === 'db_latency_ms')?.value || 0,
+            activeConnections: related.find((m) => m.name === 'db_up')?.value || 0,
+            totalQueries: related.length,
+          },
+        },
       };
     } catch (error) {
-      return { success: false, error: `Failed to get metrics: ${error}` };
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get metrics' };
     }
   }
 }

@@ -1,5 +1,6 @@
 import { PlatformMetric, CloudProvider } from '../types';
 import { advancedDatabase } from './advancedDatabase';
+import { apiFetch } from '@/lib/apiClient';
 
 export interface ConnectionConfig {
   id: string;
@@ -402,20 +403,13 @@ export class RealTimeConnectionService {
 
   private async connectAzure(config: ConnectionConfig): Promise<any> {
     try {
-      // Import Azure SDK modules dynamically
-      const { DefaultAzureCredential, ClientSecretCredential } = await import('@azure/identity');
-
-      const credential = new ClientSecretCredential(
-        config.credentials.tenantId,
-        config.credentials.clientId,
-        config.credentials.clientSecret
-      );
-
-      // For now, return a mock connection since Azure ARM packages aren't available
+      await apiFetch('/integrations', {
+        method: 'POST',
+        body: JSON.stringify({ type: 'azure', name: config.name || 'Azure', config: config.credentials }),
+      });
       return {
-        credential,
         subscriptionId: config.credentials.subscriptionId,
-        mockConnection: true
+        apiBacked: true,
       };
     } catch (error) {
       console.error('Azure connection failed:', error);
@@ -425,10 +419,13 @@ export class RealTimeConnectionService {
 
   private async connectGCP(config: ConnectionConfig): Promise<any> {
     try {
-      // For now, return a mock connection since GCP packages may not be fully compatible
+      await apiFetch('/integrations', {
+        method: 'POST',
+        body: JSON.stringify({ type: 'gcp', name: config.name || 'GCP', config: config.credentials }),
+      });
       return {
         projectId: config.credentials.projectId,
-        mockConnection: true
+        apiBacked: true,
       };
     } catch (error) {
       console.error('GCP connection failed:', error);
@@ -700,96 +697,46 @@ export class RealTimeConnectionService {
     }
   }
 
-  private async collectAzureMetrics(connection: any, config: ConnectionConfig): Promise<PlatformMetric[]> {
-    const metrics: PlatformMetric[] = [];
-    
+  private async collectAzureMetrics(_connection: any, _config: ConnectionConfig): Promise<PlatformMetric[]> {
     try {
-      if (connection.mockConnection) {
-        // Return mock metrics for Azure
-        metrics.push({
-          id: `azure-vm-status-mock-${Date.now()}`,
-          name: 'Azure VM Status',
-          value: 1,
-          unit: 'status',
-          timestamp: new Date().toISOString(),
-          source: 'azure',
-          category: 'availability',
-          tags: {
-            provider: 'azure',
-            service: 'compute',
-            vmName: 'vm-web-001',
-            vmSize: 'Standard_B1s',
-            location: 'East US'
-          }
-        });
-
-        metrics.push({
-          id: `azure-cpu-mock-${Date.now()}`,
-          name: 'Azure VM CPU Usage',
-          value: 45.2 + (Math.random() - 0.5) * 20,
-          unit: '%',
-          timestamp: new Date().toISOString(),
+      const data = await apiFetch<{ metrics: Array<{ name: string; value: number; unit: string; source: string; category?: string; timestamp?: string; tags?: Record<string, string> }> }>('/metrics/latest');
+      return (data.metrics || [])
+        .filter((m) => m.source === 'azure')
+        .map((m, i) => ({
+          id: `azure-${m.name}-${i}`,
+          name: m.name,
+          value: m.value,
+          unit: m.unit,
+          timestamp: m.timestamp || new Date().toISOString(),
           source: 'azure',
           category: 'performance',
-          tags: {
-            provider: 'azure',
-            service: 'compute',
-            vmName: 'vm-web-001',
-            metric: 'cpu'
-          }
-        });
-      }
+          tags: m.tags || { provider: 'azure' },
+        }));
     } catch (error) {
       console.error('Failed to collect Azure metrics:', error);
+      return [];
     }
-
-    return metrics;
   }
 
-  private async collectGCPMetrics(connection: any, config: ConnectionConfig): Promise<PlatformMetric[]> {
-    const metrics: PlatformMetric[] = [];
-    
+  private async collectGCPMetrics(_connection: any, _config: ConnectionConfig): Promise<PlatformMetric[]> {
     try {
-      if (connection.mockConnection) {
-        // Return mock metrics for GCP
-        metrics.push({
-          id: `gcp-instance-status-mock-${Date.now()}`,
-          name: 'GCP Instance Status',
-          value: 1,
-          unit: 'status',
-          timestamp: new Date().toISOString(),
-          source: 'gcp',
-          category: 'availability',
-          tags: {
-            provider: 'gcp',
-            service: 'compute',
-            instanceName: 'web-instance-1',
-            zone: 'us-central1-a',
-            machineType: 'e2-micro'
-          }
-        });
-
-        metrics.push({
-          id: `gcp-cpu-mock-${Date.now()}`,
-          name: 'GCP Instance CPU Usage',
-          value: 38.7 + (Math.random() - 0.5) * 15,
-          unit: '%',
-          timestamp: new Date().toISOString(),
+      const data = await apiFetch<{ metrics: Array<{ name: string; value: number; unit: string; source: string; category?: string; timestamp?: string; tags?: Record<string, string> }> }>('/metrics/latest');
+      return (data.metrics || [])
+        .filter((m) => m.source === 'gcp')
+        .map((m, i) => ({
+          id: `gcp-${m.name}-${i}`,
+          name: m.name,
+          value: m.value,
+          unit: m.unit,
+          timestamp: m.timestamp || new Date().toISOString(),
           source: 'gcp',
           category: 'performance',
-          tags: {
-            provider: 'gcp',
-            service: 'compute',
-            instanceName: 'web-instance-1',
-            metric: 'cpu'
-          }
-        });
-      }
+          tags: m.tags || { provider: 'gcp' },
+        }));
     } catch (error) {
       console.error('Failed to collect GCP metrics:', error);
+      return [];
     }
-
-    return metrics;
   }
 
   private async collectKubernetesMetrics(connection: any, config: ConnectionConfig): Promise<PlatformMetric[]> {

@@ -28,27 +28,33 @@ interface ChannelRow {
   is_enabled: number;
 }
 
-async function deliverEmail(to: string[], subject: string, body: string): Promise<void> {
-  if (!config.smtp.host || !config.smtp.user) {
+async function deliverEmail(to: string[], subject: string, body: string, smtpOverride?: Record<string, string>): Promise<void> {
+  const host = smtpOverride?.host || smtpOverride?.smtpHost || config.smtp.host;
+  const user = smtpOverride?.username || smtpOverride?.user || config.smtp.user;
+  const pass = smtpOverride?.password || config.smtp.password;
+  const port = Number(smtpOverride?.port || smtpOverride?.smtpPort || config.smtp.port);
+  const secure = smtpOverride?.secure === 'true' || config.smtp.secure;
+  const from = smtpOverride?.from || smtpOverride?.username || config.smtp.from || user;
+  if (!host || !user) {
     throw new Error('SMTP is not configured');
   }
   const transporter = nodemailer.createTransport({
-    host: config.smtp.host,
-    port: config.smtp.port,
-    secure: config.smtp.secure,
-    auth: { user: config.smtp.user, pass: config.smtp.password },
+    host,
+    port,
+    secure,
+    auth: { user, pass },
   });
   await transporter.sendMail({
-    from: config.smtp.from,
+    from,
     to: to.join(','),
     subject,
     text: body,
   });
 }
 
-async function deliverWebhook(url: string, payload: unknown, extraHeaders?: Record<string, string>): Promise<void> {
+async function deliverWebhook(url: string, payload: unknown, extraHeaders?: Record<string, string>, method = 'POST'): Promise<void> {
   const res = await fetch(url, {
-    method: 'POST',
+    method,
     headers: { 'Content-Type': 'application/json', ...extraHeaders },
     body: JSON.stringify(payload),
   });
@@ -62,9 +68,9 @@ async function sendChannel(channel: ChannelRow, alert: Record<string, unknown>):
   const text = `[${alert.severity}] ${alert.name}: ${alert.description}`;
   switch (channel.type) {
     case 'email': {
-      const recipients = (cfg.to || cfg.recipients || '').split(',').map((s) => s.trim()).filter(Boolean);
+      const recipients = (cfg.to || cfg.recipients || cfg.username || '').split(',').map((s) => s.trim()).filter(Boolean);
       if (recipients.length === 0) throw new Error('Email channel has no recipients');
-      await deliverEmail(recipients, String(alert.name), text);
+      await deliverEmail(recipients, String(alert.name), text, cfg);
       break;
     }
     case 'slack': {
@@ -106,7 +112,7 @@ async function sendChannel(channel: ChannelRow, alert: Record<string, unknown>):
     case 'webhook':
     default: {
       if (!cfg.url) throw new Error('Webhook URL missing');
-      await deliverWebhook(cfg.url, { alert, timestamp: nowIso() });
+      await deliverWebhook(cfg.url, { alert, timestamp: nowIso() }, undefined, cfg.method || 'POST');
     }
   }
 }

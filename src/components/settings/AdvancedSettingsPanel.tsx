@@ -31,6 +31,7 @@ import { advancedDatabase } from '@/services/advancedDatabase';
 import { cloudMonitoring } from '@/services/cloudMonitoring';
 import { devopsIntegrations } from '@/services/devopsIntegrations';
 import { advancedAlerting } from '@/services/advancedAlerting';
+import { apiFetch } from '@/lib/apiClient';
 
 interface DatabaseConfig {
   type: 'sqlite' | 'postgresql' | 'mysql' | 'mongodb' | 'redis' | 'indexeddb';
@@ -85,40 +86,75 @@ export const AdvancedSettingsPanel: React.FC = () => {
 
   const loadCurrentConfig = async () => {
     try {
-      // Load database configuration
-      const dbConfig = await advancedDatabase.getConnectionStatus();
-      if (dbConfig) {
-        setDatabaseConfig({ type: dbConfig.type as any });
-      }
+      const dbStatus = await advancedDatabase.testConnection({ type: databaseConfig.type, ...databaseConfig });
+      setConnectionStatus(prev => ({ ...prev, database: dbStatus }));
 
-      // Load cloud provider status
+      await cloudMonitoring.refreshStatus();
       const cloudStatus = cloudMonitoring.getProviderStatus();
-      setConnectionStatus(cloudStatus);
+      setConnectionStatus(prev => ({ ...prev, ...cloudStatus }));
 
-      // Load DevOps integration status
       const devopsStatus = devopsIntegrations.getIntegrationStatus();
       setConnectionStatus(prev => ({ ...prev, ...devopsStatus }));
 
-      // Load notification channels
-      const channels = advancedAlerting.getChannels();
-      setNotificationChannels(channels);
+      await advancedAlerting.refresh();
+      setNotificationChannels((advancedAlerting.getChannels() || []).map((ch) => ({
+        ...ch,
+        enabled: ch.enabled ?? ch.isEnabled ?? true,
+        config: ch.config || {},
+      })));
     } catch (error) {
       console.error('Failed to load configuration:', error);
     }
   };
 
+  const persistNotificationChannels = async (channels = notificationChannels) => {
+    const existing = await apiFetch<{ channels: Array<{ id: string }> }>('/channels').catch(() => ({ channels: [] as Array<{ id: string }> }));
+    const existingIds = new Set((existing.channels || []).map((c) => c.id));
+    for (const channel of channels) {
+      const payload = {
+        type: channel.type,
+        name: channel.name,
+        config: channel.config || {},
+        isEnabled: channel.enabled !== false,
+      };
+      if (channel.id && existingIds.has(channel.id)) {
+        await apiFetch(`/channels/${channel.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+      } else {
+        await apiFetch('/channels', { method: 'POST', body: JSON.stringify(payload) });
+      }
+    }
+    await advancedAlerting.refresh();
+    setNotificationChannels((advancedAlerting.getChannels() || []).map((ch) => ({
+      ...ch,
+      enabled: ch.enabled ?? ch.isEnabled ?? true,
+      config: ch.config || {},
+    })));
+  };
+
+  const updateChannelConfig = (index: number, field: string, value: string) => {
+    setNotificationChannels((prev) => {
+      const next = [...prev];
+      next[index] = {
+        ...next[index],
+        config: { ...(next[index].config || {}), [field]: value },
+      };
+      return next;
+    });
+  };
+
   const testConnections = async () => {
     setIsLoading(true);
     try {
-      // Test database connection
-      const dbStatus = await advancedDatabase.testConnection();
+      const dbStatus = await advancedDatabase.testConnection({ type: databaseConfig.type, ...databaseConfig });
       setConnectionStatus(prev => ({ ...prev, database: dbStatus }));
 
-      // Test cloud connections
+      await persistNotificationChannels().catch(() => undefined);
+      await apiFetch('/metrics/collect', { method: 'POST' }).catch(() => undefined);
+
+      await cloudMonitoring.refreshStatus();
       const cloudStatus = cloudMonitoring.getProviderStatus();
       setConnectionStatus(prev => ({ ...prev, ...cloudStatus }));
 
-      // Test DevOps connections
       const devopsStatus = devopsIntegrations.getIntegrationStatus();
       setConnectionStatus(prev => ({ ...prev, ...devopsStatus }));
     } catch (error) {
@@ -155,12 +191,20 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const saveDatabaseConfig = async () => {
     try {
       setIsLoading(true);
-      // Update database configuration
-      await advancedDatabase.closeConnection();
-      // Reinitialize with new config
-      setMessage({ type: 'success', text: 'Database configuration saved successfully' });
+      const type = databaseConfig.type === 'indexeddb' ? 'sqlite' : databaseConfig.type;
+      await apiFetch('/integrations', {
+        method: 'POST',
+        body: JSON.stringify({
+          type,
+          name: `${type} database`,
+          config: { ...databaseConfig, type },
+        }),
+      });
+      const ok = await advancedDatabase.testConnection({ type, ...databaseConfig });
+      setConnectionStatus(prev => ({ ...prev, database: ok }));
+      setMessage({ type: ok ? 'success' : 'error', text: ok ? 'Database configuration saved successfully' : 'Saved, but the connection test failed' });
     } catch (error) {
-      setMessage({ type: 'error', text: 'Failed to save database configuration' });
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to save database configuration' });
     } finally {
       setIsLoading(false);
     }
@@ -169,11 +213,11 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const saveCloudCredentials = async () => {
     try {
       setIsLoading(true);
-      cloudMonitoring.updateCredentials(cloudCredentials);
+      await cloudMonitoring.updateCredentials(cloudCredentials);
       setMessage({ type: 'success', text: 'Cloud credentials saved successfully' });
       await testConnections();
     } catch (error) {
-      setMessage({ type: 'error', text: 'Failed to save cloud credentials' });
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to save cloud credentials' });
     } finally {
       setIsLoading(false);
     }
@@ -182,7 +226,6 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const saveDevopsConfig = async () => {
     try {
       setIsLoading(true);
-      // Save DevOps configurations
       if (devopsConfig.kubernetes.enabled) {
         await devopsIntegrations.configureKubernetes(devopsConfig.kubernetes.config as any);
       }
@@ -192,10 +235,13 @@ export const AdvancedSettingsPanel: React.FC = () => {
       if (devopsConfig.jenkins.enabled) {
         await devopsIntegrations.configureJenkins(devopsConfig.jenkins.config as any);
       }
+      if (devopsConfig.git.enabled) {
+        await devopsIntegrations.configureGit(devopsConfig.git.config as any);
+      }
       setMessage({ type: 'success', text: 'DevOps configuration saved successfully' });
       await testConnections();
     } catch (error) {
-      setMessage({ type: 'error', text: 'Failed to save DevOps configuration' });
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to save DevOps configuration' });
     } finally {
       setIsLoading(false);
     }
@@ -215,6 +261,9 @@ export const AdvancedSettingsPanel: React.FC = () => {
 
   const removeNotificationChannel = (channelId: string) => {
     setNotificationChannels(prev => prev.filter(ch => ch.id !== channelId));
+    if (channelId && !channelId.startsWith('channel-')) {
+      void advancedAlerting.removeNotificationChannel(channelId);
+    }
   };
 
   const getConnectionStatusIcon = (status: boolean) => {
@@ -781,19 +830,37 @@ export const AdvancedSettingsPanel: React.FC = () => {
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                           <Label>SMTP Host</Label>
-                          <Input placeholder="smtp.gmail.com" />
+                          <Input
+                            placeholder="smtp.gmail.com"
+                            value={channel.config?.host || ''}
+                            onChange={(e) => updateChannelConfig(index, 'host', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>SMTP Port</Label>
-                          <Input placeholder="587" type="number" />
+                          <Input
+                            placeholder="587"
+                            type="number"
+                            value={channel.config?.port || ''}
+                            onChange={(e) => updateChannelConfig(index, 'port', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>Username</Label>
-                          <Input placeholder="username@gmail.com" />
+                          <Input
+                            placeholder="username@gmail.com"
+                            value={channel.config?.username || ''}
+                            onChange={(e) => updateChannelConfig(index, 'username', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>Password</Label>
-                          <Input placeholder="Password" type="password" />
+                          <Input
+                            placeholder="Password"
+                            type="password"
+                            value={channel.config?.password || ''}
+                            onChange={(e) => updateChannelConfig(index, 'password', e.target.value)}
+                          />
                         </div>
                       </div>
                     )}
@@ -802,11 +869,19 @@ export const AdvancedSettingsPanel: React.FC = () => {
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                           <Label>Webhook URL</Label>
-                          <Input placeholder="https://hooks.slack.com/..." />
+                          <Input
+                            placeholder="https://hooks.slack.com/..."
+                            value={channel.config?.url || ''}
+                            onChange={(e) => updateChannelConfig(index, 'url', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>Channel</Label>
-                          <Input placeholder="#alerts" />
+                          <Input
+                            placeholder="#alerts"
+                            value={channel.config?.channel || ''}
+                            onChange={(e) => updateChannelConfig(index, 'channel', e.target.value)}
+                          />
                         </div>
                       </div>
                     )}
@@ -815,11 +890,18 @@ export const AdvancedSettingsPanel: React.FC = () => {
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                           <Label>Webhook URL</Label>
-                          <Input placeholder="https://api.example.com/webhook" />
+                          <Input
+                            placeholder="https://api.example.com/webhook"
+                            value={channel.config?.url || ''}
+                            onChange={(e) => updateChannelConfig(index, 'url', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>Method</Label>
-                          <Select>
+                          <Select
+                            value={channel.config?.method || 'POST'}
+                            onValueChange={(value) => updateChannelConfig(index, 'method', value)}
+                          >
                             <SelectTrigger>
                               <SelectValue />
                             </SelectTrigger>

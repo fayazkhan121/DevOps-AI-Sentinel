@@ -17,6 +17,7 @@ import { advancedCostManagement } from '@/services/advancedCostManagement';
 import { advancedDatabase } from '@/services/advancedDatabase';
 import { cloudMonitoring } from '@/services/cloudMonitoring';
 import { devopsIntegrations } from '@/services/devopsIntegrations';
+import { apiFetch } from '@/lib/apiClient';
 
 interface DashboardMetrics {
   monitoring: {
@@ -164,8 +165,21 @@ export const AdvancedDashboard: React.FC = () => {
 
       // Collect infrastructure metrics
       const dbStatus = await advancedDatabase.getConnectionStatus();
+      await cloudMonitoring.refreshStatus();
       const cloudStatus = cloudMonitoring.getProviderStatus();
       const devopsStatus = devopsIntegrations.getIntegrationStatus();
+
+      let resourceCounts: Record<string, number> = {};
+      try {
+        const latest = await apiFetch<{ metrics: Array<{ name: string; value: number; source: string }> }>('/metrics/latest');
+        for (const metric of latest.metrics || []) {
+          const isInventory = metric.name.includes('count') || metric.name.includes('instance') || metric.name.includes('vm') || metric.name.includes('ec2') || metric.name.includes('container');
+          if (!isInventory) continue;
+          resourceCounts[metric.source] = (resourceCounts[metric.source] || 0) + Number(metric.value || 0);
+        }
+      } catch {
+        resourceCounts = {};
+      }
 
       setMetrics({
         monitoring: {
@@ -196,7 +210,7 @@ export const AdvancedDashboard: React.FC = () => {
           cloudProviders: Object.entries(cloudStatus).map(([name, status]) => ({
             name: name.toUpperCase(),
             status: status ? 'connected' : 'disconnected',
-            resources: Math.floor(Math.random() * 50) + 10
+            resources: status ? (resourceCounts[name] || 0) : 0
           })),
           databases: [{
             name: 'Primary Database',

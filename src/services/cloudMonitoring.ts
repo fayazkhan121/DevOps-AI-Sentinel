@@ -28,7 +28,7 @@ export class CloudMonitoringService {
 
   stopMonitoring(): void {}
 
-  updateCredentials(credentials: CloudCredentials): void {
+  async updateCredentials(credentials: CloudCredentials): Promise<void> {
     const entries: Array<[string, unknown]> = [
       ['aws', credentials.aws],
       ['azure', credentials.azure],
@@ -36,11 +36,12 @@ export class CloudMonitoringService {
     ];
     for (const [type, cfg] of entries) {
       if (!cfg) continue;
-      void apiFetch('/integrations', {
+      await apiFetch('/integrations', {
         method: 'POST',
         body: JSON.stringify({ type, name: type.toUpperCase(), config: cfg }),
-      }).then(() => this.refreshStatus());
+      });
     }
+    await this.refreshStatus();
   }
 
   getProviderStatus(): { [key: string]: boolean } {

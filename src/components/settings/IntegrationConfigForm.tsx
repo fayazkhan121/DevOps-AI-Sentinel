@@ -17,7 +17,7 @@ import { toast } from "@/components/ui/use-toast";
 
 interface IntegrationConfigFormProps {
   integration: IntegrationConfig;
-  onSubmit: (credentials: IntegrationCredentials) => void;
+  onSubmit: (credentials: IntegrationCredentials) => void | Promise<void>;
   onCancel: () => void;
 }
 
@@ -32,9 +32,7 @@ export function IntegrationConfigForm({
   const handleSubmit = async (data: IntegrationCredentials) => {
     try {
       setIsSubmitting(true);
-      // Here we would typically validate the credentials with the service
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Simulated API call
-      onSubmit(data);
+      await onSubmit(data);
       toast({
         title: "Integration configured",
         description: `Successfully configured ${integration.title}`,

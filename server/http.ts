@@ -5,7 +5,7 @@ import { config } from './config.ts';
 import { getDb, nowIso, parseJson } from './db.ts';
 import { encryptJson, decryptJson, randomId, sha256, randomToken } from './crypto.ts';
 import { requireAuth, requirePermission, requireRole, clientMeta, type AuthedRequest } from './middleware.ts';
-import { collectAllMetrics, persistMetrics, overviewFromMetrics, collectHostMetrics } from './collectors.ts';
+import { collectAllMetrics, persistMetrics, overviewFromMetrics, collectHostMetrics, probeDatabase, normalizeIntegrationConfig } from './collectors.ts';
 import { evaluateAlerts, seedDefaultRules, testChannel } from './alerting.ts';
 import { clusterLogs, detectValueAnomalies } from './anomaly.ts';
 
@@ -348,8 +348,27 @@ export function createRouter(): express.Router {
     res.json({ success: true, metrics: rows });
   });
 
-  router.get('/metrics/latest', requireAuth, requirePermission('monitoring:read'), (_req: AuthedRequest, res) => {
-    const latest = collectHostMetrics();
+  router.get('/metrics/latest', requireAuth, requirePermission('monitoring:read'), (req: AuthedRequest, res) => {
+    const host = collectHostMetrics();
+    const persisted = db.all<{ name: string; value: number; source: string; unit: string; timestamp: string; category?: string; tags?: string }>(
+      `SELECT name, value, source, unit, timestamp, category, tags FROM metrics WHERE org_id = ? AND id IN (
+         SELECT MAX(id) FROM metrics WHERE org_id = ? GROUP BY name, source
+       )`,
+      [req.user!.orgId, req.user!.orgId]
+    );
+    const hostKeys = new Set(host.map((m) => `${m.source}:${m.name}`));
+    const extra = persisted
+      .filter((row) => !hostKeys.has(`${row.source}:${row.name}`))
+      .map((row) => ({
+        name: row.name,
+        value: row.value,
+        unit: row.unit,
+        source: row.source,
+        category: row.category || 'inventory',
+        tags: parseJson(row.tags || '{}', {}),
+        timestamp: row.timestamp,
+      }));
+    const latest = [...host, ...extra];
     res.json({ success: true, metrics: latest, overview: overviewFromMetrics(latest) });
   });
 
@@ -408,8 +427,21 @@ export function createRouter(): express.Router {
   });
 
   router.get('/channels', requireAuth, requirePermission('alerts:read'), (req: AuthedRequest, res) => {
-    const rows = db.all<Record<string, unknown>>('SELECT id, org_id, type, name, is_enabled, is_default, created_at FROM notification_channels WHERE org_id = ?', [req.user!.orgId]);
-    res.json({ success: true, channels: rows });
+    const rows = db.all<Record<string, unknown>>('SELECT id, org_id, type, name, config_encrypted, is_enabled, is_default, created_at FROM notification_channels WHERE org_id = ?', [req.user!.orgId]);
+    res.json({
+      success: true,
+      channels: rows.map((row) => ({
+        id: row.id,
+        orgId: row.org_id,
+        type: row.type,
+        name: row.name,
+        config: decryptJson(row.config_encrypted as string | null, {}),
+        isEnabled: Number(row.is_enabled) === 1,
+        enabled: Number(row.is_enabled) === 1,
+        isDefault: Number(row.is_default) === 1,
+        createdAt: row.created_at,
+      })),
+    });
   });
 
   router.post('/channels', requireAuth, requirePermission('alerts:write'), (req: AuthedRequest, res) => {
@@ -535,13 +567,70 @@ export function createRouter(): express.Router {
       res.status(400).json({ success: false, message: 'type and name are required' });
       return;
     }
+    const existing = db.get<{ id: string }>('SELECT id FROM integrations WHERE org_id = ? AND type = ?', [req.user!.orgId, type]);
+    const encrypted = encryptJson(normalizeIntegrationConfig(String(type), integrationConfig || {}));
+    if (existing) {
+      db.run('UPDATE integrations SET name = ?, config_encrypted = ?, status = ?, last_sync = ?, error = NULL WHERE id = ?', [
+        name, encrypted, 'disconnected', nowIso(), existing.id,
+      ]);
+      audit(req.user!.orgId, req.user!.id, 'integration_saved', `Updated ${type} integration`, req, { type, name });
+      res.json({ success: true, id: existing.id, updated: true });
+      return;
+    }
     const id = randomId('int');
     db.run(
       'INSERT INTO integrations (id, org_id, type, name, status, config_encrypted, last_sync, error) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)',
-      [id, req.user!.orgId, type, name, 'disconnected', encryptJson(integrationConfig || {}), nowIso()]
+      [id, req.user!.orgId, type, name, 'disconnected', encrypted, nowIso()]
     );
     audit(req.user!.orgId, req.user!.id, 'integration_saved', `Saved ${type} integration`, req, { type, name });
-    res.status(201).json({ success: true, id });
+    res.status(201).json({ success: true, id, updated: false });
+  });
+
+  router.delete('/integrations/:id', requireAuth, requirePermission('settings:write'), (req: AuthedRequest, res) => {
+    db.run('DELETE FROM integrations WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+    res.json({ success: true });
+  });
+
+  router.post('/databases/test', requireAuth, requirePermission('settings:write'), async (req: AuthedRequest, res) => {
+    const result = await probeDatabase(req.body || {});
+    res.status(result.ok ? 200 : 400).json({ success: result.ok, message: result.message, latencyMs: result.latencyMs });
+  });
+
+  router.put('/channels/:id', requireAuth, requirePermission('alerts:write'), (req: AuthedRequest, res) => {
+    const existing = db.get('SELECT id FROM notification_channels WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+    if (!existing) {
+      res.status(404).json({ success: false, message: 'Channel not found' });
+      return;
+    }
+    const { type, name, config: channelConfig, isEnabled } = req.body || {};
+    db.run(
+      'UPDATE notification_channels SET type = COALESCE(?, type), name = COALESCE(?, name), config_encrypted = COALESCE(?, config_encrypted), is_enabled = COALESCE(?, is_enabled) WHERE id = ?',
+      [
+        type || null,
+        name || null,
+        channelConfig ? encryptJson(channelConfig) : null,
+        typeof isEnabled === 'boolean' ? (isEnabled ? 1 : 0) : null,
+        req.params.id,
+      ]
+    );
+    res.json({ success: true });
+  });
+
+  router.delete('/channels/:id', requireAuth, requirePermission('alerts:write'), (req: AuthedRequest, res) => {
+    db.run('DELETE FROM notification_channels WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+    res.json({ success: true });
+  });
+
+  router.post('/backups', requireAuth, requireRole('admin'), (req: AuthedRequest, res) => {
+    const id = randomId('bak');
+    db.run('INSERT INTO db_backups (id, org_id, connection_id, created_at, note) VALUES (?, ?, ?, ?, ?)', [
+      id, req.user!.orgId, String(req.body?.connectionId || 'sqlite'), nowIso(), 'sqlite snapshot metadata',
+    ]);
+    res.status(201).json({ success: true, id, createdAt: nowIso() });
+  });
+
+  router.get('/backups', requireAuth, requirePermission('settings:read'), (req: AuthedRequest, res) => {
+    res.json({ success: true, backups: db.all('SELECT * FROM db_backups WHERE org_id = ? ORDER BY created_at DESC', [req.user!.orgId]) });
   });
 
   router.post('/integrations/:id/test', requireAuth, requirePermission('settings:write'), async (req: AuthedRequest, res) => {

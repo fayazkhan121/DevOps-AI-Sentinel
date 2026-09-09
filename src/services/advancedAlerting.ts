@@ -23,11 +23,36 @@ export class AdvancedAlertingService {
     this.rules = rules.rules || [];
   }
 
-  addNotificationChannel(channel: NotificationChannel): void {
-    void apiFetch('/channels', { method: 'POST', body: JSON.stringify(channel) }).then(() => this.refresh());
+  async addNotificationChannel(channel: NotificationChannel): Promise<void> {
+    await apiFetch('/channels', {
+      method: 'POST',
+      body: JSON.stringify({
+        type: channel.type,
+        name: channel.name,
+        config: channel.config || {},
+        isEnabled: channel.enabled ?? channel.isEnabled ?? true,
+      }),
+    });
+    await this.refresh();
   }
-  removeNotificationChannel(): boolean { return true; }
-  updateNotificationChannel(): boolean { return true; }
+  async removeNotificationChannel(id: string): Promise<boolean> {
+    await apiFetch(`/channels/${id}`, { method: 'DELETE' });
+    await this.refresh();
+    return true;
+  }
+  async updateNotificationChannel(channel: NotificationChannel): Promise<boolean> {
+    await apiFetch(`/channels/${channel.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        type: channel.type,
+        name: channel.name,
+        config: channel.config || {},
+        isEnabled: channel.enabled ?? channel.isEnabled ?? true,
+      }),
+    });
+    await this.refresh();
+    return true;
+  }
   getNotificationChannels(): NotificationChannel[] { void this.refresh(); return this.channels; }
   getChannels(): NotificationChannel[] { return this.getNotificationChannels(); }
   addAlertRule(rule: AlertRule): void {

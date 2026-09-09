@@ -116,3 +116,94 @@ test('setup, login, metrics, and rbac', async () => {
   });
   assert.equal(listed.body.dashboards.length, 1);
 });
+
+test('integrations upsert, notification channels, and sqlite probe', async () => {
+  const login = await json('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'admin', password: 'super-secret-pass' }),
+  });
+  assert.equal(login.status, 200, JSON.stringify(login.body));
+  const token = login.body.token as string;
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const first = await json('/api/integrations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ type: 'prometheus', name: 'Prom', config: { url: 'http://127.0.0.1:9090' } }),
+  });
+  assert.ok(first.status === 201 || first.status === 200, JSON.stringify(first.body));
+  const id = first.body.id as string;
+  assert.ok(id);
+
+  const second = await json('/api/integrations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ type: 'prometheus', name: 'Prom-updated', config: { url: 'http://127.0.0.1:9091' } }),
+  });
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(second.body.id, id);
+  assert.equal(second.body.updated, true);
+
+  const listed = await json('/api/integrations', { headers });
+  const prom = (listed.body.integrations || []).filter((row: { type: string }) => row.type === 'prometheus');
+  assert.equal(prom.length, 1);
+
+  const aws = await json('/api/integrations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      type: 'aws',
+      name: 'AWS',
+      config: { aws_access_key_id: 'AKIATEST', aws_secret_access_key: 'secret', aws_region: 'us-east-1' },
+    }),
+  });
+  assert.ok(aws.status === 200 || aws.status === 201, JSON.stringify(aws.body));
+
+  const probeOk = await json('/api/databases/test', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ type: 'sqlite' }),
+  });
+  assert.equal(probeOk.status, 200, JSON.stringify(probeOk.body));
+  assert.equal(probeOk.body.success, true);
+
+  const probeBad = await json('/api/databases/test', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ type: 'oracle' }),
+  });
+  assert.equal(probeBad.status, 400);
+
+  const channel = await json('/api/channels', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ type: 'webhook', name: 'Hook', config: { url: 'http://127.0.0.1/hook' }, isEnabled: true }),
+  });
+  assert.equal(channel.status, 201, JSON.stringify(channel.body));
+  const channelId = channel.body.id as string;
+
+  const updated = await json(`/api/channels/${channelId}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ name: 'Hook-2', config: { url: 'http://127.0.0.1/hook2' } }),
+  });
+  assert.equal(updated.status, 200);
+
+  const channels = await json('/api/channels', { headers });
+  const saved = (channels.body.channels || []).find((row: { id: string }) => row.id === channelId);
+  assert.equal(saved.name, 'Hook-2');
+  assert.equal(saved.config.url, 'http://127.0.0.1/hook2');
+
+  const delChannel = await json(`/api/channels/${channelId}`, { method: 'DELETE', headers });
+  assert.equal(delChannel.status, 200);
+
+  const delInt = await json(`/api/integrations/${id}`, { method: 'DELETE', headers });
+  assert.equal(delInt.status, 200);
+
+  const backup = await json('/api/backups', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ connectionId: 'sqlite' }),
+  });
+  assert.equal(backup.status, 201, JSON.stringify(backup.body));
+});

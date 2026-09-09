@@ -23,6 +23,56 @@ interface IntegrationRow {
   org_id: string;
 }
 
+function pickStr(cfg: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = cfg[key];
+    if (value != null && String(value).trim() !== '') return String(value);
+  }
+  return '';
+}
+
+/** Maps UI/form field names onto the keys collectors expect. */
+export function normalizeIntegrationConfig(type: string, raw: Record<string, unknown> | null | undefined): Record<string, string> {
+  const src = (raw || {}) as Record<string, unknown>;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(src)) {
+    if (value == null || value === '') continue;
+    out[key] = typeof value === 'string' ? value : String(value);
+  }
+  const alias = (target: string, ...keys: string[]) => {
+    const value = pickStr(src, ...keys);
+    if (value) out[target] = value;
+  };
+  alias('accessKeyId', 'accessKeyId', 'aws_access_key_id', 'access_key_id');
+  alias('secretAccessKey', 'secretAccessKey', 'aws_secret_access_key', 'secret_access_key');
+  alias('region', 'region', 'aws_region');
+  alias('tenantId', 'tenantId', 'tenant_id');
+  alias('clientId', 'clientId', 'client_id');
+  alias('clientSecret', 'clientSecret', 'client_secret');
+  alias('subscriptionId', 'subscriptionId', 'subscription_id');
+  alias('projectId', 'projectId', 'project_id');
+  alias('apiToken', 'apiToken', 'api_token', 'token');
+  alias('token', 'token', 'apiToken', 'access_token', 'pat', 'secret');
+  alias('host', 'host', 'registry');
+  alias('apiServer', 'apiServer', 'api_server');
+  alias('organization', 'organization', 'organizationName', 'org');
+  alias('username', 'username', 'user');
+  alias('password', 'password', 'appPassword');
+  const kube = pickStr(src, 'kube_config', 'kubeconfig');
+  if (kube && !out.apiServer) {
+    if (kube.startsWith('http')) {
+      out.apiServer = kube;
+    } else {
+      const server = kube.match(/server:\s*(\S+)/)?.[1];
+      const kubeToken = kube.match(/token:\s*(\S+)/)?.[1];
+      if (server) out.apiServer = server;
+      if (kubeToken && !out.token) out.token = kubeToken;
+    }
+  }
+  if (type === 'jenkins' && !out.apiToken && out.token) out.apiToken = out.token;
+  return out;
+}
+
 function cpuPercent(): number {
   const cpus = os.cpus();
   if (cpus.length === 0) return 0;
@@ -181,6 +231,7 @@ async function collectAws(cfg: Record<string, string>): Promise<CollectedMetric[
         });
       }
     }
+    metrics.push(...await collectAwsCost(cfg, creds, region));
     return metrics;
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : 'AWS collection failed');
@@ -249,7 +300,7 @@ async function collectGcp(cfg: Record<string, string>): Promise<CollectedMetric[
 
 async function collectKubernetes(cfg: Record<string, string>): Promise<CollectedMetric[]> {
   const apiServer = cfg.apiServer || '';
-  const token = cfg.token || '';
+  const token = cfg.token || cfg.apiToken || '';
   if (!apiServer || !token) return [];
   const headers = { Authorization: `Bearer ${token}` };
   const [pods, nodes] = await Promise.all([
@@ -266,7 +317,7 @@ async function collectKubernetes(cfg: Record<string, string>): Promise<Collected
 }
 
 async function collectDocker(cfg: Record<string, string>): Promise<CollectedMetric[]> {
-  const host = cfg.host || process.env.DOCKER_HOST || '';
+  const host = cfg.host || cfg.registry || process.env.DOCKER_HOST || '';
   if (!host) return [];
   try {
     const Docker = (await import('dockerode')).default;
@@ -287,7 +338,7 @@ async function collectDocker(cfg: Record<string, string>): Promise<CollectedMetr
 async function collectJenkins(cfg: Record<string, string>): Promise<CollectedMetric[]> {
   const url = (cfg.url || process.env.JENKINS_URL || '').replace(/\/$/, '');
   const username = cfg.username || process.env.JENKINS_USERNAME || '';
-  const apiToken = cfg.apiToken || process.env.JENKINS_API_TOKEN || '';
+  const apiToken = cfg.apiToken || cfg.token || process.env.JENKINS_API_TOKEN || '';
   if (!url || !username || !apiToken) return [];
   const auth = Buffer.from(`${username}:${apiToken}`).toString('base64');
   const res = await fetchJson(`${url}/api/json?tree=jobs[name,color]`, {
@@ -303,7 +354,7 @@ async function collectJenkins(cfg: Record<string, string>): Promise<CollectedMet
 }
 
 async function collectGit(cfg: Record<string, string>): Promise<CollectedMetric[]> {
-  const token = cfg.token || process.env.GITHUB_TOKEN || '';
+  const token = cfg.token || cfg.apiToken || cfg.access_token || process.env.GITHUB_TOKEN || '';
   const platform = cfg.platform || cfg.type || 'github';
   if (!token) return [];
   if (platform === 'gitlab') {
@@ -338,6 +389,144 @@ async function collectPrometheus(cfg: Record<string, string>): Promise<Collected
   return [{ name: 'prometheus_up_series', value: up, unit: 'count', source: 'prometheus', category: 'availability', tags: {}, timestamp: nowIso() }];
 }
 
+async function collectAwsCost(cfg: Record<string, string>, creds: { accessKeyId: string; secretAccessKey: string }, region: string): Promise<CollectedMetric[]> {
+  try {
+    const { CostExplorerClient, GetCostAndUsageCommand } = await import('@aws-sdk/client-cost-explorer');
+    const end = new Date();
+    const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const ce = new CostExplorerClient({ region: region.startsWith('us-') ? 'us-east-1' : region, credentials: creds });
+    const result = await ce.send(new GetCostAndUsageCommand({
+      TimePeriod: { Start: fmt(start), End: fmt(end) },
+      Granularity: 'MONTHLY',
+      Metrics: ['UnblendedCost'],
+    }));
+    const amount = Number(result.ResultsByTime?.[0]?.Total?.UnblendedCost?.Amount || 0);
+    return [{
+      name: 'aws_unblended_cost',
+      value: Number(amount.toFixed(2)),
+      unit: result.ResultsByTime?.[0]?.Total?.UnblendedCost?.Unit || 'USD',
+      source: 'aws',
+      category: 'cost',
+      tags: { region },
+      timestamp: nowIso(),
+    }];
+  } catch {
+    return [];
+  }
+}
+
+async function collectTerraform(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const token = cfg.token || cfg.apiToken || '';
+  const org = cfg.organization || cfg.organizationName || '';
+  if (!token || !org) return [];
+  const res = await fetchJson(`https://app.terraform.io/api/v2/organizations/${encodeURIComponent(org)}/workspaces`, {
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/vnd.api+json' },
+  });
+  if (!res.ok) throw new Error('Terraform Cloud API request failed');
+  const count = Array.isArray((res.data as { data?: unknown[] })?.data) ? (res.data as { data: unknown[] }).data.length : 0;
+  return [{ name: 'terraform_workspaces', value: count, unit: 'count', source: 'terraform', category: 'inventory', tags: { org }, timestamp: nowIso() }];
+}
+
+async function collectAnsible(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const url = (cfg.url || cfg.towerUrl || '').replace(/\/$/, '');
+  const token = cfg.token || '';
+  if (!url || !token) return [];
+  const res = await fetchJson(`${url}/api/v2/jobs/?page_size=1`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error('Ansible/AWX API request failed');
+  const count = Number((res.data as { count?: number })?.count || 0);
+  return [{ name: 'ansible_jobs', value: count, unit: 'count', source: 'ansible', category: 'inventory', tags: {}, timestamp: nowIso() }];
+}
+
+async function collectBitbucket(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const username = cfg.username || '';
+  const password = cfg.appPassword || cfg.password || cfg.token || '';
+  const workspace = cfg.workspace || '';
+  if (!username || !password) return [];
+  const url = workspace
+    ? `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(workspace)}`
+    : 'https://api.bitbucket.org/2.0/repositories?role=member';
+  const res = await fetchJson(url, {
+    headers: { Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}` },
+  });
+  if (!res.ok) throw new Error('Bitbucket API request failed');
+  const size = Number((res.data as { size?: number; values?: unknown[] })?.size || (res.data as { values?: unknown[] })?.values?.length || 0);
+  return [{ name: 'git_repo_count', value: size, unit: 'count', source: 'bitbucket', category: 'inventory', tags: { workspace }, timestamp: nowIso() }];
+}
+
+export async function probeDatabase(cfg: Record<string, string>): Promise<{ ok: boolean; message: string; latencyMs: number }> {
+  const started = Date.now();
+  const type = (cfg.type || '').toLowerCase();
+  try {
+    if (type === 'postgresql') {
+      const pg = await import('pg');
+      const Client = pg.Client || (pg as { default?: { Client: typeof pg.Client } }).default?.Client;
+      if (!Client) throw new Error('pg Client export missing');
+      const client = new Client({
+        host: cfg.host,
+        port: Number(cfg.port || 5432),
+        user: cfg.username || cfg.user,
+        password: cfg.password,
+        database: cfg.database,
+        ssl: cfg.ssl === 'true' ? { rejectUnauthorized: false } : undefined,
+        connectionTimeoutMillis: 4000,
+      });
+      await client.connect();
+      await client.query('SELECT 1');
+      await client.end();
+    } else if (type === 'mysql') {
+      const mysqlMod = await import('mysql2/promise');
+      const mysql = (mysqlMod as { default?: typeof mysqlMod }).default || mysqlMod;
+      const conn = await mysql.createConnection({
+        host: cfg.host,
+        port: Number(cfg.port || 3306),
+        user: cfg.username || cfg.user,
+        password: cfg.password,
+        database: cfg.database,
+        connectTimeout: 4000,
+      });
+      await conn.query('SELECT 1');
+      await conn.end();
+    } else if (type === 'mongodb') {
+      const { MongoClient } = await import('mongodb');
+      const uri = cfg.connectionString || `mongodb://${cfg.host || '127.0.0.1'}:${cfg.port || 27017}/${cfg.database || 'admin'}`;
+      const client = new MongoClient(uri, { serverSelectionTimeoutMS: 4000 });
+      await client.connect();
+      await client.db().command({ ping: 1 });
+      await client.close();
+    } else if (type === 'redis') {
+      const redis = await import('redis');
+      const createClient = redis.createClient || redis.default.createClient;
+      const client = createClient({
+        socket: { host: cfg.host || '127.0.0.1', port: Number(cfg.port || 6379), connectTimeout: 4000 },
+        password: cfg.password || undefined,
+      });
+      await client.connect();
+      await client.ping();
+      await client.quit();
+    } else if (type === 'sqlite' || type === 'indexeddb' || type === 'localstorage') {
+      getDb().get('SELECT 1 as ok');
+    } else {
+      return { ok: false, message: `Unsupported database type ${type}`, latencyMs: Date.now() - started };
+    }
+    return { ok: true, message: `${type} connection successful`, latencyMs: Date.now() - started };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : 'connection failed', latencyMs: Date.now() - started };
+  }
+}
+
+async function collectDatabase(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const type = cfg.type || 'postgresql';
+  const result = await probeDatabase({ ...cfg, type });
+  if (!result.ok) throw new Error(result.message);
+  return [
+    { name: 'db_up', value: 1, unit: 'bool', source: type, category: 'availability', tags: { host: cfg.host || 'local' }, timestamp: nowIso() },
+    { name: 'db_latency_ms', value: result.latencyMs, unit: 'ms', source: type, category: 'performance', tags: { host: cfg.host || 'local' }, timestamp: nowIso() },
+  ];
+}
+
 const collectors: Record<string, (cfg: Record<string, string>) => Promise<CollectedMetric[]>> = {
   aws: collectAws,
   azure: collectAzure,
@@ -348,7 +537,16 @@ const collectors: Record<string, (cfg: Record<string, string>) => Promise<Collec
   github: collectGit,
   gitlab: collectGit,
   git: collectGit,
+  bitbucket: collectBitbucket,
+  azure_devops: collectGit,
   prometheus: collectPrometheus,
+  terraform: collectTerraform,
+  ansible: collectAnsible,
+  postgresql: collectDatabase,
+  mysql: collectDatabase,
+  mongodb: collectDatabase,
+  redis: collectDatabase,
+  sqlite: collectDatabase,
 };
 
 export async function collectAllMetrics(orgId?: string): Promise<CollectedMetric[]> {
@@ -359,7 +557,7 @@ export async function collectAllMetrics(orgId?: string): Promise<CollectedMetric
   for (const integration of integrations) {
     const fn = collectors[integration.type];
     if (!fn) continue;
-    const cfg = decryptJson<Record<string, string>>(integration.config_encrypted, {});
+    const cfg = normalizeIntegrationConfig(integration.type, decryptJson<Record<string, string>>(integration.config_encrypted, {}));
     try {
       const extra = await fn(cfg);
       metrics.push(...extra);

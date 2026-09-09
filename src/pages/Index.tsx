@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { MetricCard } from "../components/MetricCard";
 import { AlertPanel } from "../components/AlertPanel";
 import { PipelineStatus } from "../components/PipelineStatus";
@@ -9,11 +9,51 @@ import { ServiceHealth } from "../components/ServiceHealth";
 import { SystemMetricsTimeline } from "../components/SystemMetricsTimeline";
 import { AdvancedDashboard } from "../components/dashboard/AdvancedDashboard";
 import { RealTimeDashboard } from "../components/dashboard/RealTimeDashboard";
-
-
+import { apiFetch } from "@/lib/apiClient";
+import { metricsService } from "@/services/metricsService";
 
 const Index = () => {
   const [activeTab, setActiveTab] = useState("overview");
+  const [overview, setOverview] = useState({
+    systemHealth: 0,
+    activeServices: "0/0",
+    resourceUsage: 0,
+    responseTimeMs: 0,
+    healthChange: 0,
+    servicesChange: 0,
+    resourceChange: 0,
+    latencyChange: 0,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        await metricsService.refresh();
+        const data = await apiFetch<{ overview: { systemHealth: number; activeServices: string; resourceUsage: number; responseTimeMs: number } }>('/metrics/overview');
+        if (!cancelled && data.overview) {
+          setOverview({
+            systemHealth: data.overview.systemHealth,
+            activeServices: data.overview.activeServices,
+            resourceUsage: data.overview.resourceUsage,
+            responseTimeMs: data.overview.responseTimeMs,
+            healthChange: 0,
+            servicesChange: 0,
+            resourceChange: 0,
+            latencyChange: 0,
+          });
+        }
+      } catch (error) {
+        console.error('Failed to load overview metrics', error);
+      }
+    };
+    void load();
+    const timer = setInterval(() => void load(), 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-background">
@@ -67,29 +107,29 @@ const Index = () => {
             <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
               <MetricCard
                 title="System Health"
-                value="98.5%"
-                change="+2.1%"
+                value={`${overview.systemHealth}%`}
+                change={`${overview.healthChange >= 0 ? '+' : ''}${overview.healthChange}%`}
                 changeType="positive"
                 icon="health"
               />
               <MetricCard
                 title="Active Services"
-                value="45/48"
-                change="-3"
-                changeType="negative"
+                value={overview.activeServices}
+                change={`${overview.servicesChange}`}
+                changeType="neutral"
                 icon="services"
               />
               <MetricCard
                 title="Resource Usage"
-                value="72%"
-                change="+5%"
+                value={`${overview.resourceUsage}%`}
+                change={`${overview.resourceChange >= 0 ? '+' : ''}${overview.resourceChange}%`}
                 changeType="neutral"
                 icon="resources"
               />
               <MetricCard
                 title="Response Time"
-                value="45ms"
-                change="-12ms"
+                value={`${overview.responseTimeMs}ms`}
+                change={`${overview.latencyChange}ms`}
                 changeType="positive"
                 icon="performance"
               />

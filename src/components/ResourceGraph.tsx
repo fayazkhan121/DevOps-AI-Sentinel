@@ -10,6 +10,7 @@ import {
   YAxis,
 } from "recharts";
 import WebSocketService from "@/services/websocket";
+import { apiFetch } from "@/lib/apiClient";
 
 interface MetricData {
   time: string;
@@ -17,16 +18,22 @@ interface MetricData {
 }
 
 export function ResourceGraph() {
-  const [data, setData] = useState<MetricData[]>([
-    { time: "09:06:57", value: 65 },
-    { time: "05:06:57", value: 75 },
-    { time: "01:06:57", value: 55 },
-    { time: "21:06:57", value: 85 },
-    { time: "17:06:57", value: 70 },
-    { time: "12:06:57", value: 60 },
-  ]);
+  const [data, setData] = useState<MetricData[]>([]);
 
   useEffect(() => {
+    const load = async () => {
+      try {
+        const history = await apiFetch<{ metrics: Array<{ timestamp: string; value: number }> }>('/metrics?name=cpu_usage&hours=6');
+        setData((history.metrics || []).slice(-12).map((row) => ({
+          time: new Date(row.timestamp).toLocaleTimeString(),
+          value: row.value,
+        })));
+      } catch (error) {
+        console.error('Failed to load resource graph', error);
+      }
+    };
+    void load();
+
     const ws = WebSocketService.getInstance();
     
     ws.subscribeToMetrics((newData: MetricData) => {

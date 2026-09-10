@@ -206,8 +206,13 @@ export class DatabaseManager {
     }
   }
 
-  async restoreDatabase(_connectionId: string, _backupId: string): Promise<DatabaseResult> {
-    return { success: false, error: 'Restore is not supported for SQLite metadata snapshots' };
+  async restoreDatabase(_connectionId: string, backupId: string): Promise<DatabaseResult> {
+    try {
+      await apiFetch(`/backups/${backupId}/restore`, { method: 'POST' });
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Restore failed' };
+    }
   }
 
   async listBackups(): Promise<unknown[]> {

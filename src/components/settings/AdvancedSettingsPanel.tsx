@@ -83,6 +83,8 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const [totpUrl, setTotpUrl] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [totpPassword, setTotpPassword] = useState('');
+  const [ipAllowlist, setIpAllowlist] = useState<Array<{ id: string; cidr: string }>>([]);
+  const [newCidr, setNewCidr] = useState('');
 
   useEffect(() => {
     loadCurrentConfig();
@@ -109,6 +111,8 @@ export const AdvancedSettingsPanel: React.FC = () => {
       })));
       const me = await apiFetch<{ user?: { totpEnabled?: boolean } }>('/auth/me').catch(() => ({ user: undefined }));
       setTotpEnabled(Boolean(me.user?.totpEnabled));
+      const settingsData = await apiFetch<{ ipAllowlist?: Array<{ id: string; cidr: string }> }>('/settings').catch(() => ({ ipAllowlist: [] }));
+      setIpAllowlist(settingsData.ipAllowlist || []);
     } catch (error) {
       console.error('Failed to load configuration:', error);
     }
@@ -1007,6 +1011,65 @@ export const AdvancedSettingsPanel: React.FC = () => {
                     />
                   </div>
                 )}
+              </div>
+
+              <Separator />
+
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-lg font-semibold">IP Allowlist</h3>
+                  <p className="text-sm text-muted-foreground">CIDR ranges allowed to access this organization</p>
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={newCidr}
+                    onChange={(e) => setNewCidr(e.target.value)}
+                    placeholder="192.168.0.0/16"
+                  />
+                  <Button
+                    onClick={async () => {
+                      const cidr = newCidr.trim();
+                      if (!cidr) {
+                        setMessage({ type: 'error', text: 'cidr is required' });
+                        return;
+                      }
+                      try {
+                        await apiFetch('/settings/ip-allowlist', {
+                          method: 'POST',
+                          body: JSON.stringify({ cidr }),
+                        });
+                        setNewCidr('');
+                        const settingsData = await apiFetch<{ ipAllowlist?: Array<{ id: string; cidr: string }> }>('/settings');
+                        setIpAllowlist(settingsData.ipAllowlist || []);
+                      } catch (error) {
+                        setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to add CIDR' });
+                      }
+                    }}
+                  >
+                    Add
+                  </Button>
+                </div>
+                <div className="space-y-2">
+                  {ipAllowlist.map((entry) => (
+                    <div key={entry.id} className="flex items-center justify-between">
+                      <span className="text-sm">{entry.cidr}</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={async () => {
+                          try {
+                            await apiFetch(`/settings/ip-allowlist/${entry.id}`, { method: 'DELETE' });
+                            setIpAllowlist((prev) => prev.filter((item) => item.id !== entry.id));
+                          } catch (error) {
+                            setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to remove CIDR' });
+                          }
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
               </div>
             </CardContent>
           </Card>

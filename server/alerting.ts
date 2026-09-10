@@ -28,6 +28,15 @@ interface ChannelRow {
   is_enabled: number;
 }
 
+export async function sendSystemEmail(to: string, subject: string, body: string): Promise<boolean> {
+  try {
+    await deliverEmail([to], subject, body);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function deliverEmail(to: string[], subject: string, body: string, smtpOverride?: Record<string, string>): Promise<void> {
   const host = smtpOverride?.host || smtpOverride?.smtpHost || config.smtp.host;
   const user = smtpOverride?.username || smtpOverride?.user || config.smtp.user;

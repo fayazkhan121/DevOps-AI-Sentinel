@@ -2,12 +2,15 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { config } from './config.ts';
-import { getDb, nowIso, parseJson } from './db.ts';
+import { getDb, nowIso, parseJson, type DbAdapter } from './db.ts';
 import { encryptJson, decryptJson, randomId, sha256, randomToken } from './crypto.ts';
 import { requireAuth, requirePermission, requireRole, clientMeta, type AuthedRequest } from './middleware.ts';
 import { collectAllMetrics, persistMetrics, overviewFromMetrics, collectHostMetrics, probeDatabase, normalizeIntegrationConfig } from './collectors.ts';
-import { evaluateAlerts, seedDefaultRules, testChannel } from './alerting.ts';
+import { evaluateAlerts, testChannel } from './alerting.ts';
 import { clusterLogs, detectValueAnomalies } from './anomaly.ts';
+import { provisionOrg, findLoginUsers, publicUser as tenantPublicUser, upsertSetting, orgWantsHostMetrics } from './tenancy.ts';
+import { generateTotpSecret, verifyTotp, totpOtpauthUrl } from './totp.ts';
+import { createBackup, restoreBackup } from './backup.ts';
 
 const ROLE_PERMISSIONS: Record<string, string[]> = {
   admin: [
@@ -31,24 +34,12 @@ function signToken(user: { id: string; username: string; role: string; orgId: st
 }
 
 function publicUser(row: Record<string, unknown>) {
-  return {
-    id: row.id,
-    username: row.username,
-    email: row.email,
-    fullName: row.full_name,
-    role: row.role,
-    permissions: parseJson(String(row.permissions || '[]'), [] as string[]),
-    isActive: Number(row.is_active) === 1,
-    lastLogin: row.last_login,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    orgId: row.org_id,
-  };
+  return tenantPublicUser(row);
 }
 
-function audit(orgId: string | null, userId: string, action: string, description: string, req?: AuthedRequest, details?: unknown): void {
+async function audit(orgId: string | null, userId: string, action: string, description: string, req?: AuthedRequest, details?: unknown): Promise<void> {
   const meta = req ? clientMeta(req) : { ip: 'system', userAgent: 'system' };
-  getDb().run(
+  await getDb().run(
     'INSERT INTO audit_logs (id, org_id, user_id, action, description, details, ip_address, user_agent, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     [randomId('log'), orgId, userId, action, description, details ? JSON.stringify(details) : null, meta.ip, meta.userAgent, nowIso()]
   );
@@ -56,7 +47,26 @@ function audit(orgId: string | null, userId: string, action: string, description
 
 export function createRouter(): express.Router {
   const router = express.Router();
-  const db = getDb();
+  const db: DbAdapter = {
+    get kind() {
+      return getDb().kind;
+    },
+    exec(sql) {
+      return getDb().exec(sql);
+    },
+    run(sql, params) {
+      return getDb().run(sql, params);
+    },
+    get(sql, params) {
+      return getDb().get(sql, params);
+    },
+    all(sql, params) {
+      return getDb().all(sql, params);
+    },
+    close() {
+      return getDb().close();
+    },
+  };
 
   router.get('/health', (_req, res) => {
     res.json({
@@ -67,14 +77,14 @@ export function createRouter(): express.Router {
     });
   });
 
-  router.get('/setup/status', (_req, res) => {
-    const count = db.get<{ c: number }>('SELECT COUNT(*) as c FROM users');
-    res.json({ needsSetup: (count?.c || 0) === 0 });
+  router.get('/setup/status', async (_req, res) => {
+    const count = await db.get<{ c: number }>('SELECT COUNT(*) as c FROM users');
+    res.json({ needsSetup: Number(count?.c || 0) === 0 });
   });
 
   router.post('/setup', async (req, res) => {
-    const count = db.get<{ c: number }>('SELECT COUNT(*) as c FROM users');
-    if ((count?.c || 0) > 0) {
+    const count = await db.get<{ c: number }>('SELECT COUNT(*) as c FROM users');
+    if (Number(count?.c || 0) > 0) {
       res.status(409).json({ success: false, message: 'Setup already completed' });
       return;
     }
@@ -85,42 +95,47 @@ export function createRouter(): express.Router {
       res.status(400).json({ success: false, message: 'Admin username and a password of at least 8 characters are required' });
       return;
     }
-    const orgId = randomId('org');
-    const userId = randomId('user');
-    const passwordHash = await bcrypt.hash(String(adminPassword), 12);
-    db.run('INSERT INTO orgs (id, name, created_at) VALUES (?, ?, ?)', [orgId, companyName || systemName || 'Default Org', nowIso()]);
-    db.run(
-      `INSERT INTO users (id, org_id, username, email, full_name, role, permissions, password_hash, is_active, failed_login_attempts, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'admin', ?, ?, 1, 0, ?, ?)`,
-      [userId, orgId, String(adminUsername), adminEmail || 'admin@localhost', adminFullName || 'Administrator', JSON.stringify(ROLE_PERMISSIONS.admin), passwordHash, nowIso(), nowIso()]
-    );
-    db.run('INSERT INTO settings (key, org_id, value_encrypted) VALUES (?, ?, ?)', [
-      'system_config',
-      orgId,
-      encryptJson({ systemName: systemName || 'DevOps AI Sentinel', companyName: companyName || '', setupDate: nowIso() }),
-    ]);
-    seedDefaultRules(orgId);
-    audit(orgId, userId, 'system_setup', 'Initial administrator created', req as AuthedRequest);
+    const provisioned = await provisionOrg({
+      orgName: companyName || systemName || 'Default Org',
+      adminUsername: String(adminUsername),
+      adminPassword: String(adminPassword),
+      adminEmail,
+      adminFullName,
+      collectHostMetrics: true,
+    });
+    await audit(provisioned.orgId, provisioned.userId, 'system_setup', 'Initial administrator created', req as AuthedRequest);
     const sessionId = randomId('session');
     const expires = new Date(Date.now() + config.sessionHours * 3600 * 1000).toISOString();
     const meta = clientMeta(req);
-    db.run(
+    await db.run(
       'INSERT INTO sessions (id, user_id, created_at, expires_at, is_active, ip_address, user_agent, last_activity) VALUES (?, ?, ?, ?, 1, ?, ?, ?)',
-      [sessionId, userId, nowIso(), expires, meta.ip, meta.userAgent, nowIso()]
+      [sessionId, provisioned.userId, nowIso(), expires, meta.ip, meta.userAgent, nowIso()]
     );
-    const user = { id: userId, username: String(adminUsername), role: 'admin', orgId };
+    const user = { id: provisioned.userId, username: String(adminUsername), role: 'admin', orgId: provisioned.orgId };
     res.json({
       success: true,
       token: signToken(user, sessionId, false),
-      user: publicUser(db.get('SELECT * FROM users WHERE id = ?', [userId]) as Record<string, unknown>),
+      user: publicUser(await db.get('SELECT * FROM users WHERE id = ?', [provisioned.userId]) as Record<string, unknown>),
     });
   });
 
   router.post('/auth/login', async (req, res) => {
-    const { username, password, rememberMe } = req.body || {};
-    const user = db.get<Record<string, unknown>>('SELECT * FROM users WHERE username = ?', [String(username || '')]);
+    const { username, password, rememberMe, org, orgId, totp, totpCode } = req.body || {};
+    const matches = await findLoginUsers(String(username || ''), String(org || orgId || ''));
+    if (matches.length > 1) {
+      res.status(400).json({
+        success: false,
+        message: 'Multiple organizations match this username; pass org or orgId',
+        orgs: await Promise.all(matches.map(async (row) => {
+          const orgRow = await db.get<{ id: string; name: string }>('SELECT id, name FROM orgs WHERE id = ?', [String(row.org_id)]);
+          return { id: orgRow?.id, name: orgRow?.name };
+        })),
+      });
+      return;
+    }
+    const user = matches[0];
     if (!user) {
-      audit(null, 'system', 'login_failed', `Unknown user ${username}`, req as AuthedRequest);
+      await audit(null, 'system', 'login_failed', `Unknown user ${username}`, req as AuthedRequest);
       res.status(401).json({ success: false, message: 'Invalid credentials' });
       return;
     }
@@ -136,21 +151,32 @@ export function createRouter(): express.Router {
     if (!ok) {
       const attempts = Number(user.failed_login_attempts || 0) + 1;
       const lockedUntil = attempts >= 5 ? new Date(Date.now() + 30 * 60 * 1000).toISOString() : null;
-      db.run('UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?', [attempts, lockedUntil, String(user.id)]);
-      audit(String(user.org_id), String(user.id), 'login_failed', 'Invalid password', req as AuthedRequest);
+      await db.run('UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?', [attempts, lockedUntil, String(user.id)]);
+      await audit(String(user.org_id), String(user.id), 'login_failed', 'Invalid password', req as AuthedRequest);
       res.status(401).json({ success: false, message: 'Invalid credentials' });
       return;
     }
-    db.run('UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_login = ? WHERE id = ?', [nowIso(), String(user.id)]);
+    if (Number(user.totp_enabled) === 1) {
+      const code = String(totp || totpCode || '');
+      if (!code) {
+        res.status(401).json({ success: false, requiresTotp: true, message: 'TOTP code required' });
+        return;
+      }
+      if (!verifyTotp(String(user.totp_secret || ''), code)) {
+        res.status(401).json({ success: false, requiresTotp: true, message: 'Invalid TOTP code' });
+        return;
+      }
+    }
+    await db.run('UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_login = ? WHERE id = ?', [nowIso(), String(user.id)]);
     const sessionId = randomId('session');
     const hours = rememberMe ? config.rememberMeDays * 24 : config.sessionHours;
     const expires = new Date(Date.now() + hours * 3600 * 1000).toISOString();
     const meta = clientMeta(req);
-    db.run(
+    await db.run(
       'INSERT INTO sessions (id, user_id, created_at, expires_at, is_active, ip_address, user_agent, last_activity) VALUES (?, ?, ?, ?, 1, ?, ?, ?)',
       [sessionId, String(user.id), nowIso(), expires, meta.ip, meta.userAgent, nowIso()]
     );
-    audit(String(user.org_id), String(user.id), 'user_login', 'User logged in', req as AuthedRequest);
+    await audit(String(user.org_id), String(user.id), 'user_login', 'User logged in', req as AuthedRequest);
     res.json({
       success: true,
       token: signToken({ id: String(user.id), username: String(user.username), role: String(user.role), orgId: String(user.org_id) }, sessionId, Boolean(rememberMe)),
@@ -158,33 +184,34 @@ export function createRouter(): express.Router {
     });
   });
 
-  router.post('/auth/logout', requireAuth, (req: AuthedRequest, res) => {
-    db.run('UPDATE sessions SET is_active = 0 WHERE id = ?', [req.user!.sessionId]);
+  router.post('/auth/logout', requireAuth, async (req: AuthedRequest, res) => {
+    await db.run('UPDATE sessions SET is_active = 0 WHERE id = ?', [req.user!.sessionId]);
     audit(req.user!.orgId, req.user!.id, 'user_logout', 'User logged out', req);
     res.json({ success: true });
   });
 
-  router.get('/auth/me', requireAuth, (req: AuthedRequest, res) => {
-    const user = db.get<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [req.user!.id]);
+  router.get('/auth/me', requireAuth, async (req: AuthedRequest, res) => {
+    const user = await db.get<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [req.user!.id]);
     res.json({ success: true, user: user ? publicUser(user) : null });
   });
 
-  router.post('/auth/refresh', requireAuth, (req: AuthedRequest, res) => {
+  router.post('/auth/refresh', requireAuth, async (req: AuthedRequest, res) => {
     const expires = new Date(Date.now() + config.sessionHours * 3600 * 1000).toISOString();
-    db.run('UPDATE sessions SET expires_at = ?, last_activity = ? WHERE id = ?', [expires, nowIso(), req.user!.sessionId]);
+    await db.run('UPDATE sessions SET expires_at = ?, last_activity = ? WHERE id = ?', [expires, nowIso(), req.user!.sessionId]);
     res.json({
       success: true,
       token: signToken({ id: req.user!.id, username: req.user!.username, role: req.user!.role, orgId: req.user!.orgId }, req.user!.sessionId, false),
     });
   });
 
-  router.get('/auth/github', (_req, res) => {
+  router.get('/auth/github', async (req, res) => {
     if (!config.githubOauth.clientId) {
       res.status(501).json({ success: false, message: 'GitHub OAuth is not configured' });
       return;
     }
     const state = randomToken(16);
-    db.run('INSERT INTO oauth_states (state, created_at) VALUES (?, ?)', [state, nowIso()]);
+    const orgId = String(req.query.org || req.query.orgId || '');
+    await db.run('INSERT INTO oauth_states (state, created_at, org_id, purpose) VALUES (?, ?, ?, ?)', [state, nowIso(), orgId || null, 'github']);
     const url = new URL('https://github.com/login/oauth/authorize');
     url.searchParams.set('client_id', config.githubOauth.clientId);
     url.searchParams.set('redirect_uri', config.githubOauth.callbackUrl);
@@ -195,12 +222,12 @@ export function createRouter(): express.Router {
 
   router.get('/auth/github/callback', async (req, res) => {
     const { code, state } = req.query;
-    const saved = db.get('SELECT state FROM oauth_states WHERE state = ?', [String(state || '')]);
+    const saved = await db.get<{ state: string; org_id: string | null }>('SELECT state, org_id FROM oauth_states WHERE state = ?', [String(state || '')]);
     if (!saved || !code) {
       res.status(400).send('Invalid OAuth state');
       return;
     }
-    db.run('DELETE FROM oauth_states WHERE state = ?', [String(state)]);
+    await db.run('DELETE FROM oauth_states WHERE state = ?', [String(state)]);
     const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -220,25 +247,32 @@ export function createRouter(): express.Router {
     });
     const profile = await profileRes.json() as { login?: string; email?: string; name?: string };
     const username = profile.login || '';
-    let user = db.get<Record<string, unknown>>('SELECT * FROM users WHERE username = ?', [username]);
+    const matches = await findLoginUsers(username, saved.org_id || undefined);
+    if (matches.length > 1) {
+      res.status(400).send('Multiple organizations match this GitHub user; restart from /api/auth/github?org=');
+      return;
+    }
+    let user = matches[0];
     if (!user) {
-      const org = db.get<{ id: string }>('SELECT id FROM orgs LIMIT 1');
+      const org = saved.org_id
+        ? await db.get<{ id: string }>('SELECT id FROM orgs WHERE id = ?', [saved.org_id])
+        : await db.get<{ id: string }>('SELECT id FROM orgs LIMIT 1');
       if (!org) {
         res.status(409).send('Complete first-time setup before SSO login');
         return;
       }
       const userId = randomId('user');
       const randomPassword = await bcrypt.hash(randomToken(), 12);
-      db.run(
+      await db.run(
         `INSERT INTO users (id, org_id, username, email, full_name, role, permissions, password_hash, is_active, failed_login_attempts, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, 'viewer', ?, ?, 1, 0, ?, ?)`,
         [userId, org.id, username, profile.email || `${username}@users.noreply.github.com`, profile.name || username, JSON.stringify(ROLE_PERMISSIONS.viewer), randomPassword, nowIso(), nowIso()]
       );
-      user = db.get<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [userId])!;
+      user = await db.get<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [userId])!;
     }
     const sessionId = randomId('session');
     const expires = new Date(Date.now() + config.sessionHours * 3600 * 1000).toISOString();
-    db.run(
+    await db.run(
       'INSERT INTO sessions (id, user_id, created_at, expires_at, is_active, last_activity) VALUES (?, ?, ?, ?, 1, ?)',
       [sessionId, String(user.id), nowIso(), expires, nowIso()]
     );
@@ -246,8 +280,8 @@ export function createRouter(): express.Router {
     res.redirect(`${config.webOrigin}/login?sso=${encodeURIComponent(jwtToken)}`);
   });
 
-  router.get('/users', requireAuth, requirePermission('user:read'), (req: AuthedRequest, res) => {
-    const users = db.all<Record<string, unknown>>('SELECT * FROM users WHERE org_id = ?', [req.user!.orgId]).map(publicUser);
+  router.get('/users', requireAuth, requirePermission('user:read'), async (req: AuthedRequest, res) => {
+    const users = (await db.all<Record<string, unknown>>('SELECT * FROM users WHERE org_id = ?', [req.user!.orgId])).map(publicUser);
     res.json({ success: true, users });
   });
 
@@ -257,7 +291,7 @@ export function createRouter(): express.Router {
       res.status(400).json({ success: false, message: 'Username and password (8+ characters) are required' });
       return;
     }
-    const exists = db.get('SELECT id FROM users WHERE username = ?', [username]);
+    const exists = await db.get('SELECT id FROM users WHERE username = ? AND org_id = ?', [username, req.user!.orgId]);
     if (exists) {
       res.status(409).json({ success: false, message: 'Username already exists' });
       return;
@@ -265,7 +299,7 @@ export function createRouter(): express.Router {
     const id = randomId('user');
     const assignedRole = ['admin', 'user', 'viewer'].includes(role) ? role : 'user';
     const perms = Array.isArray(permissions) && permissions.length ? permissions : ROLE_PERMISSIONS[assignedRole];
-    db.run(
+    await db.run(
       `INSERT INTO users (id, org_id, username, email, full_name, role, permissions, password_hash, is_active, failed_login_attempts, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
       [id, req.user!.orgId, username, email || '', fullName || '', assignedRole, JSON.stringify(perms), await bcrypt.hash(String(password), 12), nowIso(), nowIso()]
@@ -275,7 +309,7 @@ export function createRouter(): express.Router {
   });
 
   router.put('/users/:id', requireAuth, requirePermission('user:write'), async (req: AuthedRequest, res) => {
-    const user = db.get<Record<string, unknown>>('SELECT * FROM users WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+    const user = await db.get<Record<string, unknown>>('SELECT * FROM users WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
     if (!user) {
       res.status(404).json({ success: false, message: 'User not found' });
       return;
@@ -289,7 +323,7 @@ export function createRouter(): express.Router {
       }
       passwordHash = await bcrypt.hash(String(password), 12);
     }
-    db.run(
+    await db.run(
       `UPDATE users SET email = ?, full_name = ?, role = ?, is_active = ?, permissions = ?, password_hash = ?, updated_at = ? WHERE id = ?`,
       [
         email ?? user.email,
@@ -306,19 +340,19 @@ export function createRouter(): express.Router {
     res.json({ success: true });
   });
 
-  router.delete('/users/:id', requireAuth, requirePermission('user:delete'), (req: AuthedRequest, res) => {
+  router.delete('/users/:id', requireAuth, requirePermission('user:delete'), async (req: AuthedRequest, res) => {
     if (req.params.id === req.user!.id) {
       res.status(400).json({ success: false, message: 'Cannot delete your own account' });
       return;
     }
-    db.run('DELETE FROM users WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+    await db.run('DELETE FROM users WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
     audit(req.user!.orgId, req.user!.id, 'user_deleted', `Deleted user ${req.params.id}`, req);
     res.json({ success: true });
   });
 
   router.post('/users/me/password', requireAuth, async (req: AuthedRequest, res) => {
     const { currentPassword, newPassword } = req.body || {};
-    const user = db.get<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = ?', [req.user!.id]);
+    const user = await db.get<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = ?', [req.user!.id]);
     if (!user || !(await bcrypt.compare(String(currentPassword || ''), user.password_hash))) {
       res.status(400).json({ success: false, message: 'Current password is incorrect' });
       return;
@@ -327,30 +361,30 @@ export function createRouter(): express.Router {
       res.status(400).json({ success: false, message: 'New password must be at least 8 characters' });
       return;
     }
-    db.run('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', [await bcrypt.hash(String(newPassword), 12), nowIso(), req.user!.id]);
+    await db.run('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', [await bcrypt.hash(String(newPassword), 12), nowIso(), req.user!.id]);
     audit(req.user!.orgId, req.user!.id, 'password_changed', 'Password changed', req);
     res.json({ success: true });
   });
 
-  router.get('/audit', requireAuth, requirePermission('logs:read'), (req: AuthedRequest, res) => {
+  router.get('/audit', requireAuth, requirePermission('logs:read'), async (req: AuthedRequest, res) => {
     const limit = Math.min(Number(req.query.limit || 200), 1000);
-    const logs = db.all('SELECT * FROM audit_logs WHERE org_id = ? ORDER BY timestamp DESC LIMIT ?', [req.user!.orgId, limit]);
+    const logs = await db.all('SELECT * FROM audit_logs WHERE org_id = ? ORDER BY timestamp DESC LIMIT ?', [req.user!.orgId, limit]);
     res.json({ success: true, logs });
   });
 
-  router.get('/metrics', requireAuth, requirePermission('monitoring:read'), (req: AuthedRequest, res) => {
-    const hours = Math.min(Number(req.query.hours || 24), 168);
+  router.get('/metrics', requireAuth, requirePermission('monitoring:read'), async (req: AuthedRequest, res) => {
+    const hours = Math.min(Number(req.query.hours || 24), 24 * 90);
     const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
     const name = req.query.name ? String(req.query.name) : null;
     const rows = name
-      ? db.all('SELECT * FROM metrics WHERE org_id = ? AND name = ? AND timestamp >= ? ORDER BY timestamp ASC', [req.user!.orgId, name, since])
-      : db.all('SELECT * FROM metrics WHERE org_id = ? AND timestamp >= ? ORDER BY timestamp ASC', [req.user!.orgId, since]);
+      ? await db.all('SELECT * FROM metrics WHERE org_id = ? AND name = ? AND timestamp >= ? ORDER BY timestamp ASC', [req.user!.orgId, name, since])
+      : await db.all('SELECT * FROM metrics WHERE org_id = ? AND timestamp >= ? ORDER BY timestamp ASC', [req.user!.orgId, since]);
     res.json({ success: true, metrics: rows });
   });
 
-  router.get('/metrics/latest', requireAuth, requirePermission('monitoring:read'), (req: AuthedRequest, res) => {
-    const host = collectHostMetrics();
-    const persisted = db.all<{ name: string; value: number; source: string; unit: string; timestamp: string; category?: string; tags?: string }>(
+  router.get('/metrics/latest', requireAuth, requirePermission('monitoring:read'), async (req: AuthedRequest, res) => {
+    const host = await orgWantsHostMetrics(req.user!.orgId) ? collectHostMetrics() : [];
+    const persisted = await db.all<{ name: string; value: number; source: string; unit: string; timestamp: string; category?: string; tags?: string }>(
       `SELECT name, value, source, unit, timestamp, category, tags FROM metrics WHERE org_id = ? AND id IN (
          SELECT MAX(id) FROM metrics WHERE org_id = ? GROUP BY name, source
        )`,
@@ -372,8 +406,8 @@ export function createRouter(): express.Router {
     res.json({ success: true, metrics: latest, overview: overviewFromMetrics(latest) });
   });
 
-  router.get('/metrics/overview', requireAuth, requirePermission('monitoring:read'), (req: AuthedRequest, res) => {
-    const latest = db.all<{ name: string; value: number; source: string; unit: string; timestamp: string }>(
+  router.get('/metrics/overview', requireAuth, requirePermission('monitoring:read'), async (req: AuthedRequest, res) => {
+    const latest = await db.all<{ name: string; value: number; source: string; unit: string; timestamp: string }>(
       `SELECT name, value, source, unit, timestamp FROM metrics WHERE org_id = ? AND id IN (
          SELECT MAX(id) FROM metrics WHERE org_id = ? GROUP BY name, source
        )`,
@@ -381,44 +415,44 @@ export function createRouter(): express.Router {
     );
     const mapped = latest.map((m) => ({ ...m, tags: {}, category: 'performance' }));
     const overview = overviewFromMetrics(mapped as never);
-    const services = summarizeServices(req.user!.orgId);
+    const services = await summarizeServices(req.user!.orgId);
     res.json({ success: true, overview, latest, services });
   });
 
   router.post('/metrics/collect', requireAuth, requirePermission('monitoring:write'), async (req: AuthedRequest, res) => {
     const metrics = await collectAllMetrics(req.user!.orgId);
-    persistMetrics(metrics, req.user!.orgId);
+    await persistMetrics(metrics, req.user!.orgId);
     const alerts = await evaluateAlerts(req.user!.orgId, metrics);
     res.json({ success: true, collected: metrics.length, alertsTriggered: alerts.length, metrics, overview: overviewFromMetrics(metrics) });
   });
 
-  router.get('/alerts', requireAuth, requirePermission('alerts:read'), (req: AuthedRequest, res) => {
-    const alerts = db.all('SELECT * FROM alerts WHERE org_id = ? ORDER BY timestamp DESC LIMIT 200', [req.user!.orgId]);
+  router.get('/alerts', requireAuth, requirePermission('alerts:read'), async (req: AuthedRequest, res) => {
+    const alerts = await db.all('SELECT * FROM alerts WHERE org_id = ? ORDER BY timestamp DESC LIMIT 200', [req.user!.orgId]);
     res.json({ success: true, alerts });
   });
 
-  router.post('/alerts/:id/ack', requireAuth, requirePermission('alerts:write'), (req: AuthedRequest, res) => {
-    db.run("UPDATE alerts SET status = 'acknowledged', acknowledged_at = ?, acknowledged_by = ? WHERE id = ? AND org_id = ?", [nowIso(), req.user!.id, req.params.id, req.user!.orgId]);
+  router.post('/alerts/:id/ack', requireAuth, requirePermission('alerts:write'), async (req: AuthedRequest, res) => {
+    await db.run("UPDATE alerts SET status = 'acknowledged', acknowledged_at = ?, acknowledged_by = ? WHERE id = ? AND org_id = ?", [nowIso(), req.user!.id, req.params.id, req.user!.orgId]);
     res.json({ success: true });
   });
 
-  router.post('/alerts/:id/resolve', requireAuth, requirePermission('alerts:write'), (req: AuthedRequest, res) => {
-    db.run("UPDATE alerts SET status = 'resolved', resolved_at = ?, resolved_by = ? WHERE id = ? AND org_id = ?", [nowIso(), req.user!.id, req.params.id, req.user!.orgId]);
+  router.post('/alerts/:id/resolve', requireAuth, requirePermission('alerts:write'), async (req: AuthedRequest, res) => {
+    await db.run("UPDATE alerts SET status = 'resolved', resolved_at = ?, resolved_by = ? WHERE id = ? AND org_id = ?", [nowIso(), req.user!.id, req.params.id, req.user!.orgId]);
     res.json({ success: true });
   });
 
-  router.get('/alert-rules', requireAuth, requirePermission('alerts:read'), (req: AuthedRequest, res) => {
-    res.json({ success: true, rules: db.all('SELECT * FROM alert_rules WHERE org_id = ?', [req.user!.orgId]) });
+  router.get('/alert-rules', requireAuth, requirePermission('alerts:read'), async (req: AuthedRequest, res) => {
+    res.json({ success: true, rules: await db.all('SELECT * FROM alert_rules WHERE org_id = ?', [req.user!.orgId]) });
   });
 
-  router.post('/alert-rules', requireAuth, requirePermission('alerts:write'), (req: AuthedRequest, res) => {
+  router.post('/alert-rules', requireAuth, requirePermission('alerts:write'), async (req: AuthedRequest, res) => {
     const { name, description, metric, operator, threshold, severity, durationSeconds, actions } = req.body || {};
     if (!name || !metric || !operator) {
       res.status(400).json({ success: false, message: 'name, metric, and operator are required' });
       return;
     }
     const id = randomId('rule');
-    db.run(
+    await db.run(
       `INSERT INTO alert_rules (id, org_id, name, description, metric, operator, threshold, duration_seconds, severity, enabled, actions, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       [id, req.user!.orgId, name, description || '', metric, operator, Number(threshold), Number(durationSeconds || 0), severity || 'warning', JSON.stringify(actions || {}), nowIso()]
@@ -426,8 +460,8 @@ export function createRouter(): express.Router {
     res.status(201).json({ success: true, id });
   });
 
-  router.get('/channels', requireAuth, requirePermission('alerts:read'), (req: AuthedRequest, res) => {
-    const rows = db.all<Record<string, unknown>>('SELECT id, org_id, type, name, config_encrypted, is_enabled, is_default, created_at FROM notification_channels WHERE org_id = ?', [req.user!.orgId]);
+  router.get('/channels', requireAuth, requirePermission('alerts:read'), async (req: AuthedRequest, res) => {
+    const rows = await db.all<Record<string, unknown>>('SELECT id, org_id, type, name, config_encrypted, is_enabled, is_default, created_at FROM notification_channels WHERE org_id = ?', [req.user!.orgId]);
     res.json({
       success: true,
       channels: rows.map((row) => ({
@@ -444,14 +478,14 @@ export function createRouter(): express.Router {
     });
   });
 
-  router.post('/channels', requireAuth, requirePermission('alerts:write'), (req: AuthedRequest, res) => {
+  router.post('/channels', requireAuth, requirePermission('alerts:write'), async (req: AuthedRequest, res) => {
     const { type, name, config: channelConfig, isEnabled } = req.body || {};
     if (!type || !name) {
       res.status(400).json({ success: false, message: 'type and name are required' });
       return;
     }
     const id = randomId('channel');
-    db.run(
+    await db.run(
       'INSERT INTO notification_channels (id, org_id, type, name, config_encrypted, is_enabled, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)',
       [id, req.user!.orgId, type, name, encryptJson(channelConfig || {}), isEnabled === false ? 0 : 1, nowIso()]
     );
@@ -459,6 +493,11 @@ export function createRouter(): express.Router {
   });
 
   router.post('/channels/:id/test', requireAuth, requirePermission('alerts:write'), async (req: AuthedRequest, res) => {
+    const existing = await db.get('SELECT id FROM notification_channels WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+    if (!existing) {
+      res.status(404).json({ success: false, message: 'Channel not found' });
+      return;
+    }
     try {
       await testChannel(req.params.id);
       res.json({ success: true });
@@ -467,8 +506,8 @@ export function createRouter(): express.Router {
     }
   });
 
-  router.get('/dashboards', requireAuth, (req: AuthedRequest, res) => {
-    const rows = db.all('SELECT * FROM dashboards WHERE org_id = ? ORDER BY updated_at DESC', [req.user!.orgId]);
+  router.get('/dashboards', requireAuth, async (req: AuthedRequest, res) => {
+    const rows = await db.all('SELECT * FROM dashboards WHERE org_id = ? ORDER BY updated_at DESC', [req.user!.orgId]);
     res.json({
       success: true,
       dashboards: rows.map((row: Record<string, unknown>) => ({
@@ -480,14 +519,14 @@ export function createRouter(): express.Router {
     });
   });
 
-  router.post('/dashboards', requireAuth, (req: AuthedRequest, res) => {
+  router.post('/dashboards', requireAuth, async (req: AuthedRequest, res) => {
     const { name, description, category, tags, widgets, layout, refreshInterval, isPublic } = req.body || {};
     if (!name) {
       res.status(400).json({ success: false, message: 'name is required' });
       return;
     }
     const id = randomId('dash');
-    db.run(
+    await db.run(
       `INSERT INTO dashboards (id, org_id, owner_id, name, description, category, tags, widgets, layout, refresh_interval, is_public, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, req.user!.orgId, req.user!.id, name, description || '', category || 'custom', JSON.stringify(tags || []), JSON.stringify(widgets || []), layout || 'grid', Number(refreshInterval || 30), isPublic ? 1 : 0, nowIso(), nowIso()]
@@ -495,14 +534,14 @@ export function createRouter(): express.Router {
     res.status(201).json({ success: true, id });
   });
 
-  router.put('/dashboards/:id', requireAuth, (req: AuthedRequest, res) => {
-    const existing = db.get<Record<string, unknown>>('SELECT * FROM dashboards WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+  router.put('/dashboards/:id', requireAuth, async (req: AuthedRequest, res) => {
+    const existing = await db.get<Record<string, unknown>>('SELECT * FROM dashboards WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
     if (!existing) {
       res.status(404).json({ success: false, message: 'Dashboard not found' });
       return;
     }
     const body = req.body || {};
-    db.run(
+    await db.run(
       `UPDATE dashboards SET name = ?, description = ?, category = ?, tags = ?, widgets = ?, layout = ?, refresh_interval = ?, is_public = ?, updated_at = ? WHERE id = ?`,
       [
         body.name ?? existing.name,
@@ -520,13 +559,13 @@ export function createRouter(): express.Router {
     res.json({ success: true });
   });
 
-  router.delete('/dashboards/:id', requireAuth, (req: AuthedRequest, res) => {
-    db.run('DELETE FROM dashboards WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+  router.delete('/dashboards/:id', requireAuth, async (req: AuthedRequest, res) => {
+    await db.run('DELETE FROM dashboards WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
     res.json({ success: true });
   });
 
-  router.get('/dashboards/:id/export', requireAuth, (req: AuthedRequest, res) => {
-    const row = db.get<Record<string, unknown>>('SELECT * FROM dashboards WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+  router.get('/dashboards/:id/export', requireAuth, async (req: AuthedRequest, res) => {
+    const row = await db.get<Record<string, unknown>>('SELECT * FROM dashboards WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
     if (!row) {
       res.status(404).json({ success: false, message: 'Dashboard not found' });
       return;
@@ -541,14 +580,14 @@ export function createRouter(): express.Router {
     });
   });
 
-  router.post('/dashboards/import', requireAuth, (req: AuthedRequest, res) => {
+  router.post('/dashboards/import', requireAuth, async (req: AuthedRequest, res) => {
     const dashboard = req.body?.dashboard || req.body;
     if (!dashboard?.name) {
       res.status(400).json({ success: false, message: 'dashboard.name is required' });
       return;
     }
     const id = randomId('dash');
-    db.run(
+    await db.run(
       `INSERT INTO dashboards (id, org_id, owner_id, name, description, category, tags, widgets, layout, refresh_interval, is_public, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       [id, req.user!.orgId, req.user!.id, dashboard.name, dashboard.description || '', dashboard.category || 'custom', JSON.stringify(dashboard.tags || []), JSON.stringify(dashboard.widgets || []), dashboard.layout || 'grid', Number(dashboard.refreshInterval || 30), nowIso(), nowIso()]
@@ -556,38 +595,42 @@ export function createRouter(): express.Router {
     res.status(201).json({ success: true, id });
   });
 
-  router.get('/integrations', requireAuth, requirePermission('settings:read'), (req: AuthedRequest, res) => {
-    const rows = db.all<Record<string, unknown>>('SELECT id, org_id, type, name, status, last_sync, error FROM integrations WHERE org_id = ?', [req.user!.orgId]);
+  router.get('/integrations', requireAuth, requirePermission('settings:read'), async (req: AuthedRequest, res) => {
+    const rows = await db.all<Record<string, unknown>>('SELECT id, org_id, type, name, status, last_sync, error FROM integrations WHERE org_id = ?', [req.user!.orgId]);
     res.json({ success: true, integrations: rows });
   });
 
-  router.post('/integrations', requireAuth, requirePermission('settings:write'), (req: AuthedRequest, res) => {
-    const { type, name, config: integrationConfig } = req.body || {};
+  router.post('/integrations', requireAuth, requirePermission('settings:write'), async (req: AuthedRequest, res) => {
+    const { type, name, config: integrationConfig, id: existingId } = req.body || {};
     if (!type || !name) {
       res.status(400).json({ success: false, message: 'type and name are required' });
       return;
     }
-    const existing = db.get<{ id: string }>('SELECT id FROM integrations WHERE org_id = ? AND type = ?', [req.user!.orgId, type]);
     const encrypted = encryptJson(normalizeIntegrationConfig(String(type), integrationConfig || {}));
-    if (existing) {
-      db.run('UPDATE integrations SET name = ?, config_encrypted = ?, status = ?, last_sync = ?, error = NULL WHERE id = ?', [
+    if (existingId) {
+      const existing = await db.get<{ id: string }>('SELECT id FROM integrations WHERE id = ? AND org_id = ?', [existingId, req.user!.orgId]);
+      if (!existing) {
+        res.status(404).json({ success: false, message: 'Integration not found' });
+        return;
+      }
+      await db.run('UPDATE integrations SET name = ?, config_encrypted = ?, status = ?, last_sync = ?, error = NULL WHERE id = ?', [
         name, encrypted, 'disconnected', nowIso(), existing.id,
       ]);
-      audit(req.user!.orgId, req.user!.id, 'integration_saved', `Updated ${type} integration`, req, { type, name });
+      await audit(req.user!.orgId, req.user!.id, 'integration_saved', `Updated ${type} integration`, req, { type, name });
       res.json({ success: true, id: existing.id, updated: true });
       return;
     }
     const id = randomId('int');
-    db.run(
+    await db.run(
       'INSERT INTO integrations (id, org_id, type, name, status, config_encrypted, last_sync, error) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)',
       [id, req.user!.orgId, type, name, 'disconnected', encrypted, nowIso()]
     );
-    audit(req.user!.orgId, req.user!.id, 'integration_saved', `Saved ${type} integration`, req, { type, name });
+    await audit(req.user!.orgId, req.user!.id, 'integration_saved', `Saved ${type} integration`, req, { type, name });
     res.status(201).json({ success: true, id, updated: false });
   });
 
-  router.delete('/integrations/:id', requireAuth, requirePermission('settings:write'), (req: AuthedRequest, res) => {
-    db.run('DELETE FROM integrations WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+  router.delete('/integrations/:id', requireAuth, requirePermission('settings:write'), async (req: AuthedRequest, res) => {
+    await db.run('DELETE FROM integrations WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
     res.json({ success: true });
   });
 
@@ -596,14 +639,14 @@ export function createRouter(): express.Router {
     res.status(result.ok ? 200 : 400).json({ success: result.ok, message: result.message, latencyMs: result.latencyMs });
   });
 
-  router.put('/channels/:id', requireAuth, requirePermission('alerts:write'), (req: AuthedRequest, res) => {
-    const existing = db.get('SELECT id FROM notification_channels WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+  router.put('/channels/:id', requireAuth, requirePermission('alerts:write'), async (req: AuthedRequest, res) => {
+    const existing = await db.get('SELECT id FROM notification_channels WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
     if (!existing) {
       res.status(404).json({ success: false, message: 'Channel not found' });
       return;
     }
     const { type, name, config: channelConfig, isEnabled } = req.body || {};
-    db.run(
+    await db.run(
       'UPDATE notification_channels SET type = COALESCE(?, type), name = COALESCE(?, name), config_encrypted = COALESCE(?, config_encrypted), is_enabled = COALESCE(?, is_enabled) WHERE id = ?',
       [
         type || null,
@@ -616,79 +659,89 @@ export function createRouter(): express.Router {
     res.json({ success: true });
   });
 
-  router.delete('/channels/:id', requireAuth, requirePermission('alerts:write'), (req: AuthedRequest, res) => {
-    db.run('DELETE FROM notification_channels WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+  router.delete('/channels/:id', requireAuth, requirePermission('alerts:write'), async (req: AuthedRequest, res) => {
+    await db.run('DELETE FROM notification_channels WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
     res.json({ success: true });
   });
 
-  router.post('/backups', requireAuth, requireRole('admin'), (req: AuthedRequest, res) => {
-    const id = randomId('bak');
-    db.run('INSERT INTO db_backups (id, org_id, connection_id, created_at, note) VALUES (?, ?, ?, ?, ?)', [
-      id, req.user!.orgId, String(req.body?.connectionId || 'sqlite'), nowIso(), 'sqlite snapshot metadata',
-    ]);
-    res.status(201).json({ success: true, id, createdAt: nowIso() });
+  router.post('/backups', requireAuth, requireRole('admin'), async (req: AuthedRequest, res) => {
+    try {
+      const backup = await createBackup(req.user!.orgId, String(req.body?.note || ''));
+      res.status(201).json({ success: true, id: backup.id, createdAt: backup.createdAt, sizeBytes: backup.sizeBytes, kind: backup.kind, note: backup.note });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error instanceof Error ? error.message : 'Backup failed' });
+    }
   });
 
-  router.get('/backups', requireAuth, requirePermission('settings:read'), (req: AuthedRequest, res) => {
-    res.json({ success: true, backups: db.all('SELECT * FROM db_backups WHERE org_id = ? ORDER BY created_at DESC', [req.user!.orgId]) });
+  router.post('/backups/:id/restore', requireAuth, requireRole('admin'), async (req: AuthedRequest, res) => {
+    try {
+      const backup = await restoreBackup(req.user!.orgId, req.params.id);
+      res.json({ success: true, id: backup.id, restoredAt: nowIso() });
+    } catch (error) {
+      res.status(400).json({ success: false, message: error instanceof Error ? error.message : 'Restore failed' });
+    }
+  });
+
+  router.get('/backups', requireAuth, requirePermission('settings:read'), async (req: AuthedRequest, res) => {
+    const rows = await db.all<Record<string, unknown>>(
+      'SELECT id, org_id, connection_id, created_at, note, size_bytes, kind FROM db_backups WHERE org_id = ? ORDER BY created_at DESC',
+      [req.user!.orgId]
+    );
+    res.json({ success: true, backups: rows });
   });
 
   router.post('/integrations/:id/test', requireAuth, requirePermission('settings:write'), async (req: AuthedRequest, res) => {
     try {
       const metrics = await collectAllMetrics(req.user!.orgId);
-      persistMetrics(metrics, req.user!.orgId);
-      const row = db.get('SELECT status, error FROM integrations WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+      await persistMetrics(metrics, req.user!.orgId);
+      const row = await db.get('SELECT status, error FROM integrations WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
       res.json({ success: true, integration: row, collected: metrics.length });
     } catch (error) {
       res.status(400).json({ success: false, message: error instanceof Error ? error.message : 'Test failed' });
     }
   });
 
-  router.get('/settings', requireAuth, requirePermission('settings:read'), (req: AuthedRequest, res) => {
-    const row = db.get<{ value_encrypted: string }>('SELECT value_encrypted FROM settings WHERE key = ? AND org_id = ?', ['system_config', req.user!.orgId]);
+  router.get('/settings', requireAuth, requirePermission('settings:read'), async (req: AuthedRequest, res) => {
+    const row = await db.get<{ value_encrypted: string }>('SELECT value_encrypted FROM settings WHERE key = ? AND org_id = ?', ['system_config', req.user!.orgId]);
     res.json({
       success: true,
       settings: decryptJson(row?.value_encrypted, {}),
-      ipAllowlist: db.all('SELECT id, cidr FROM ip_allowlist WHERE org_id = ?', [req.user!.orgId]),
+      ipAllowlist: await db.all('SELECT id, cidr FROM ip_allowlist WHERE org_id = ?', [req.user!.orgId]),
     });
   });
 
-  router.put('/settings', requireAuth, requirePermission('settings:write'), (req: AuthedRequest, res) => {
-    db.run('INSERT INTO settings (key, org_id, value_encrypted) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_encrypted = excluded.value_encrypted', [
-      'system_config',
-      req.user!.orgId,
-      encryptJson(req.body || {}),
-    ]);
+  router.put('/settings', requireAuth, requirePermission('settings:write'), async (req: AuthedRequest, res) => {
+    await upsertSetting(req.user!.orgId, 'system_config', req.body || {});
     res.json({ success: true });
   });
 
-  router.post('/settings/ip-allowlist', requireAuth, requireRole('admin'), (req: AuthedRequest, res) => {
+  router.post('/settings/ip-allowlist', requireAuth, requireRole('admin'), async (req: AuthedRequest, res) => {
     const cidr = String(req.body?.cidr || '');
     if (!cidr) {
       res.status(400).json({ success: false, message: 'cidr is required' });
       return;
     }
-    db.run('INSERT INTO ip_allowlist (id, org_id, cidr) VALUES (?, ?, ?)', [randomId('ip'), req.user!.orgId, cidr]);
+    await db.run('INSERT INTO ip_allowlist (id, org_id, cidr) VALUES (?, ?, ?)', [randomId('ip'), req.user!.orgId, cidr]);
     res.status(201).json({ success: true });
   });
 
-  router.get('/anomalies', requireAuth, requirePermission('monitoring:read'), (req: AuthedRequest, res) => {
-    const series = db.all<{ value: number; timestamp: string }>(
+  router.get('/anomalies', requireAuth, requirePermission('monitoring:read'), async (req: AuthedRequest, res) => {
+    const series = (await db.all<{ value: number; timestamp: string }>(
       `SELECT value, timestamp FROM metrics WHERE org_id = ? AND name = 'cpu_usage' ORDER BY timestamp DESC LIMIT 120`,
       [req.user!.orgId]
-    ).reverse();
+    )).slice().reverse();
     const points = detectValueAnomalies(series);
     const anomalies = points.filter((p) => p.isAnomaly).slice(-10).reverse();
     res.json({ success: true, anomalies, sampleSize: series.length });
   });
 
-  router.post('/anomalies/logs', requireAuth, requirePermission('monitoring:read'), (req: AuthedRequest, res) => {
+  router.post('/anomalies/logs', requireAuth, requirePermission('monitoring:read'), async (req: AuthedRequest, res) => {
     const logs = Array.isArray(req.body?.logs) ? req.body.logs.map(String) : [];
     res.json({ success: true, clusters: clusterLogs(logs) });
   });
 
-  router.get('/reports/compliance', requireAuth, requirePermission('logs:read'), (req: AuthedRequest, res) => {
-    const logs = db.all('SELECT timestamp, user_id, action, description, ip_address FROM audit_logs WHERE org_id = ? ORDER BY timestamp DESC LIMIT 500', [req.user!.orgId]);
+  router.get('/reports/compliance', requireAuth, requirePermission('logs:read'), async (req: AuthedRequest, res) => {
+    const logs = await db.all('SELECT timestamp, user_id, action, description, ip_address FROM audit_logs WHERE org_id = ? ORDER BY timestamp DESC LIMIT 500', [req.user!.orgId]);
     const format = String(req.query.format || 'json');
     if (format === 'csv') {
       const header = 'timestamp,user_id,action,description,ip_address';
@@ -707,20 +760,20 @@ export function createRouter(): express.Router {
     });
   });
 
-  router.post('/agents/keys', requireAuth, requireRole('admin'), (req: AuthedRequest, res) => {
+  router.post('/agents/keys', requireAuth, requireRole('admin'), async (req: AuthedRequest, res) => {
     const name = String(req.body?.name || 'host-agent');
     const token = randomToken(24);
-    db.run('INSERT INTO agent_keys (id, org_id, name, key_hash, created_at) VALUES (?, ?, ?, ?, ?)', [randomId('agent'), req.user!.orgId, name, sha256(token), nowIso()]);
+    await db.run('INSERT INTO agent_keys (id, org_id, name, key_hash, created_at) VALUES (?, ?, ?, ?, ?)', [randomId('agent'), req.user!.orgId, name, sha256(token), nowIso()]);
     res.status(201).json({ success: true, token, name });
   });
 
-  router.post('/agents/ingest', (req, res) => {
+  router.post('/agents/ingest', async (req, res) => {
     const key = String(req.headers['x-agent-key'] || '');
     if (!key) {
       res.status(401).json({ success: false, message: 'Missing X-Agent-Key' });
       return;
     }
-    const row = db.get<{ id: string; org_id: string }>('SELECT id, org_id FROM agent_keys WHERE key_hash = ?', [sha256(key)]);
+    const row = await db.get<{ id: string; org_id: string }>('SELECT id, org_id FROM agent_keys WHERE key_hash = ?', [sha256(key)]);
     if (!row) {
       res.status(401).json({ success: false, message: 'Invalid agent key' });
       return;
@@ -729,18 +782,18 @@ export function createRouter(): express.Router {
     const timestamp = nowIso();
     for (const metric of incoming) {
       if (!metric?.name || typeof metric.value !== 'number') continue;
-      db.run(
+      await db.run(
         'INSERT INTO metrics (org_id, name, value, unit, source, category, tags, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         [row.org_id, String(metric.name), metric.value, metric.unit || '', metric.source || 'agent', metric.category || 'custom', JSON.stringify(metric.tags || {}), timestamp]
       );
     }
-    db.run('UPDATE agent_keys SET last_seen = ? WHERE id = ?', [timestamp, row.id]);
+    await db.run('UPDATE agent_keys SET last_seen = ? WHERE id = ?', [timestamp, row.id]);
     res.json({ success: true, ingested: incoming.length });
   });
 
-  router.get('/infra/status', requireAuth, requirePermission('monitoring:read'), (req: AuthedRequest, res) => {
-    const integrations = db.all<Record<string, unknown>>('SELECT type, name, status, last_sync, error FROM integrations WHERE org_id = ?', [req.user!.orgId]);
-    const host = collectHostMetrics();
+  router.get('/infra/status', requireAuth, requirePermission('monitoring:read'), async (req: AuthedRequest, res) => {
+    const integrations = await db.all<Record<string, unknown>>('SELECT type, name, status, last_sync, error FROM integrations WHERE org_id = ?', [req.user!.orgId]);
+    const host = await orgWantsHostMetrics(req.user!.orgId) ? collectHostMetrics() : [];
     res.json({
       success: true,
       host: overviewFromMetrics(host),
@@ -750,12 +803,310 @@ export function createRouter(): express.Router {
     });
   });
 
+  router.get('/orgs/current', requireAuth, async (req: AuthedRequest, res) => {
+    const org = await db.get('SELECT id, name, created_at FROM orgs WHERE id = ?', [req.user!.orgId]);
+    res.json({ success: true, org });
+  });
+
+  router.post('/orgs', async (req, res) => {
+    const { name, adminUsername, adminPassword, adminEmail, adminFullName, collectHostMetrics } = req.body || {};
+    if (!name || !adminUsername || !adminPassword || String(adminPassword).length < 8) {
+      res.status(400).json({ success: false, message: 'name, adminUsername, and adminPassword (8+ characters) are required' });
+      return;
+    }
+    try {
+      const provisioned = await provisionOrg({
+        orgName: String(name),
+        adminUsername: String(adminUsername),
+        adminPassword: String(adminPassword),
+        adminEmail,
+        adminFullName,
+        collectHostMetrics: collectHostMetrics === true,
+      });
+      await audit(provisioned.orgId, provisioned.userId, 'org_created', `Created organization ${name}`, req as AuthedRequest);
+      const sessionId = randomId('session');
+      const expires = new Date(Date.now() + config.sessionHours * 3600 * 1000).toISOString();
+      await db.run(
+        'INSERT INTO sessions (id, user_id, created_at, expires_at, is_active, last_activity) VALUES (?, ?, ?, ?, 1, ?)',
+        [sessionId, provisioned.userId, nowIso(), expires, nowIso()]
+      );
+      res.status(201).json({
+        success: true,
+        orgId: provisioned.orgId,
+        token: signToken({ id: provisioned.userId, username: String(adminUsername), role: 'admin', orgId: provisioned.orgId }, sessionId, false),
+        user: publicUser(await db.get('SELECT * FROM users WHERE id = ?', [provisioned.userId]) as Record<string, unknown>),
+      });
+    } catch (error) {
+      res.status(400).json({ success: false, message: error instanceof Error ? error.message : 'Failed to create organization' });
+    }
+  });
+
+  router.post('/auth/totp/setup', requireAuth, async (req: AuthedRequest, res) => {
+    const secret = generateTotpSecret();
+    await db.run('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?', [secret, req.user!.id]);
+    const user = await db.get<{ username: string }>('SELECT username FROM users WHERE id = ?', [req.user!.id]);
+    res.json({ success: true, secret, otpauthUrl: totpOtpauthUrl(String(user?.username || req.user!.username), secret) });
+  });
+
+  router.post('/auth/totp/enable', requireAuth, async (req: AuthedRequest, res) => {
+    const user = await db.get<{ totp_secret: string }>('SELECT totp_secret FROM users WHERE id = ?', [req.user!.id]);
+    if (!user?.totp_secret || !verifyTotp(user.totp_secret, String(req.body?.code || req.body?.totp || ''))) {
+      res.status(400).json({ success: false, message: 'Invalid TOTP code' });
+      return;
+    }
+    await db.run('UPDATE users SET totp_enabled = 1 WHERE id = ?', [req.user!.id]);
+    await audit(req.user!.orgId, req.user!.id, 'totp_enabled', 'TOTP enabled', req);
+    res.json({ success: true });
+  });
+
+  router.post('/auth/totp/disable', requireAuth, async (req: AuthedRequest, res) => {
+    const user = await db.get<{ password_hash: string; totp_secret: string; totp_enabled: number }>('SELECT password_hash, totp_secret, totp_enabled FROM users WHERE id = ?', [req.user!.id]);
+    if (!user || !(await bcrypt.compare(String(req.body?.password || ''), user.password_hash))) {
+      res.status(400).json({ success: false, message: 'Current password is required to disable TOTP' });
+      return;
+    }
+    await db.run('UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?', [req.user!.id]);
+    await audit(req.user!.orgId, req.user!.id, 'totp_disabled', 'TOTP disabled', req);
+    res.json({ success: true });
+  });
+
+  router.post('/users/invite', requireAuth, requirePermission('user:write'), async (req: AuthedRequest, res) => {
+    const email = String(req.body?.email || '').trim();
+    const role = ['admin', 'user', 'viewer'].includes(req.body?.role) ? req.body.role : 'user';
+    if (!email) {
+      res.status(400).json({ success: false, message: 'email is required' });
+      return;
+    }
+    const token = randomToken(24);
+    const id = randomId('invite');
+    await db.run(
+      'INSERT INTO invites (id, org_id, email, role, token_hash, invited_by, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, req.user!.orgId, email, role, sha256(token), req.user!.id, new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(), nowIso()]
+    );
+    await audit(req.user!.orgId, req.user!.id, 'user_invited', `Invited ${email}`, req);
+    res.status(201).json({
+      success: true,
+      id,
+      ...(config.env !== 'production' ? { token } : {}),
+    });
+  });
+
+  router.post('/auth/accept-invite', async (req, res) => {
+    const { token, username, password, fullName } = req.body || {};
+    if (!token || !username || !password || String(password).length < 8) {
+      res.status(400).json({ success: false, message: 'token, username, and password (8+ characters) are required' });
+      return;
+    }
+    const invite = await db.get<Record<string, unknown>>(
+      'SELECT * FROM invites WHERE token_hash = ? AND accepted_at IS NULL',
+      [sha256(String(token))]
+    );
+    if (!invite || new Date(String(invite.expires_at)) < new Date()) {
+      res.status(400).json({ success: false, message: 'Invite is invalid or expired' });
+      return;
+    }
+    const exists = await db.get('SELECT id FROM users WHERE username = ? AND org_id = ?', [username, String(invite.org_id)]);
+    if (exists) {
+      res.status(409).json({ success: false, message: 'Username already exists in this organization' });
+      return;
+    }
+    const userId = randomId('user');
+    const assignedRole = String(invite.role);
+    await db.run(
+      `INSERT INTO users (id, org_id, username, email, full_name, role, permissions, password_hash, is_active, failed_login_attempts, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+      [userId, String(invite.org_id), String(username), String(invite.email), fullName || '', assignedRole, JSON.stringify(ROLE_PERMISSIONS[assignedRole] || ROLE_PERMISSIONS.user), await bcrypt.hash(String(password), 12), nowIso(), nowIso()]
+    );
+    await db.run('UPDATE invites SET accepted_at = ? WHERE id = ?', [nowIso(), String(invite.id)]);
+    res.status(201).json({ success: true, id: userId });
+  });
+
+  router.post('/auth/forgot-password', async (req, res) => {
+    const matches = await findLoginUsers(String(req.body?.username || req.body?.email || ''), String(req.body?.org || req.body?.orgId || ''));
+    const user = matches[0];
+    if (user) {
+      const token = randomToken(24);
+      await db.run(
+        'INSERT INTO password_resets (id, user_id, org_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [randomId('reset'), String(user.id), String(user.org_id), sha256(token), new Date(Date.now() + 2 * 3600 * 1000).toISOString(), nowIso()]
+      );
+      if (config.env !== 'production') {
+        res.json({ success: true, token });
+        return;
+      }
+    }
+    res.json({ success: true });
+  });
+
+  router.post('/auth/reset-password', async (req, res) => {
+    const { token, password } = req.body || {};
+    if (!token || !password || String(password).length < 8) {
+      res.status(400).json({ success: false, message: 'token and password (8+ characters) are required' });
+      return;
+    }
+    const row = await db.get<Record<string, unknown>>(
+      'SELECT * FROM password_resets WHERE token_hash = ? AND used_at IS NULL',
+      [sha256(String(token))]
+    );
+    if (!row || new Date(String(row.expires_at)) < new Date()) {
+      res.status(400).json({ success: false, message: 'Reset token is invalid or expired' });
+      return;
+    }
+    await db.run('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', [await bcrypt.hash(String(password), 12), nowIso(), String(row.user_id)]);
+    await db.run('UPDATE password_resets SET used_at = ? WHERE id = ?', [nowIso(), String(row.id)]);
+    res.json({ success: true });
+  });
+
+  router.get('/auth/oidc/start', async (req, res) => {
+    if (!config.oidc.issuer || !config.oidc.clientId) {
+      res.status(501).json({ success: false, message: 'OIDC is not configured' });
+      return;
+    }
+    const discovery = await fetch(`${config.oidc.issuer.replace(/\/$/, '')}/.well-known/openid-configuration`);
+    if (!discovery.ok) {
+      res.status(502).json({ success: false, message: 'OIDC discovery failed' });
+      return;
+    }
+    const meta = await discovery.json() as { authorization_endpoint?: string };
+    if (!meta.authorization_endpoint) {
+      res.status(502).json({ success: false, message: 'OIDC authorization_endpoint missing' });
+      return;
+    }
+    const state = randomToken(16);
+    await db.run('INSERT INTO oauth_states (state, created_at, org_id, purpose) VALUES (?, ?, ?, ?)', [state, nowIso(), String(req.query.org || ''), 'oidc']);
+    const url = new URL(meta.authorization_endpoint);
+    url.searchParams.set('client_id', config.oidc.clientId);
+    url.searchParams.set('redirect_uri', config.oidc.redirectUrl);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('scope', config.oidc.scope);
+    url.searchParams.set('state', state);
+    res.redirect(url.toString());
+  });
+
+  router.get('/auth/oidc/callback', async (req, res) => {
+    const { code, state } = req.query;
+    const saved = await db.get<{ org_id: string | null }>('SELECT org_id FROM oauth_states WHERE state = ?', [String(state || '')]);
+    if (!saved || !code || !config.oidc.issuer) {
+      res.status(400).send('Invalid OIDC state');
+      return;
+    }
+    await db.run('DELETE FROM oauth_states WHERE state = ?', [String(state)]);
+    const discovery = await fetch(`${config.oidc.issuer.replace(/\/$/, '')}/.well-known/openid-configuration`);
+    const meta = await discovery.json() as { token_endpoint?: string; userinfo_endpoint?: string };
+    const tokenRes = await fetch(String(meta.token_endpoint), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: String(code),
+        redirect_uri: config.oidc.redirectUrl,
+        client_id: config.oidc.clientId,
+        client_secret: config.oidc.clientSecret,
+      }),
+    });
+    const tokenJson = await tokenRes.json() as { access_token?: string };
+    if (!tokenJson.access_token) {
+      res.status(401).send('OIDC token exchange failed');
+      return;
+    }
+    const profileRes = await fetch(String(meta.userinfo_endpoint), { headers: { Authorization: `Bearer ${tokenJson.access_token}` } });
+    const profile = await profileRes.json() as { email?: string; preferred_username?: string; name?: string; sub?: string };
+    const username = profile.preferred_username || profile.email || profile.sub || '';
+    const org = saved.org_id
+      ? await db.get<{ id: string }>('SELECT id FROM orgs WHERE id = ?', [saved.org_id])
+      : await db.get<{ id: string }>('SELECT id FROM orgs LIMIT 1');
+    if (!org || !username) {
+      res.status(409).send('Complete organization setup before OIDC login');
+      return;
+    }
+    let user = await db.get<Record<string, unknown>>('SELECT * FROM users WHERE username = ? AND org_id = ?', [username, org.id]);
+    if (!user) {
+      const userId = randomId('user');
+      await db.run(
+        `INSERT INTO users (id, org_id, username, email, full_name, role, permissions, password_hash, is_active, failed_login_attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'viewer', ?, ?, 1, 0, ?, ?)`,
+        [userId, org.id, username, profile.email || '', profile.name || username, JSON.stringify(ROLE_PERMISSIONS.viewer), await bcrypt.hash(randomToken(), 12), nowIso(), nowIso()]
+      );
+      user = await db.get<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [userId]);
+    }
+    const sessionId = randomId('session');
+    const expires = new Date(Date.now() + config.sessionHours * 3600 * 1000).toISOString();
+    await db.run('INSERT INTO sessions (id, user_id, created_at, expires_at, is_active, last_activity) VALUES (?, ?, ?, ?, 1, ?)', [sessionId, String(user!.id), nowIso(), expires, nowIso()]);
+    const jwtToken = signToken({ id: String(user!.id), username: String(user!.username), role: String(user!.role), orgId: String(user!.org_id) }, sessionId, false);
+    res.redirect(`${config.webOrigin}/login?sso=${encodeURIComponent(jwtToken)}`);
+  });
+
+  router.get('/auth/saml/login', async (req, res) => {
+    if (!config.saml.idpSsoUrl) {
+      res.status(501).json({ success: false, message: 'SAML is not configured. Set SAML_IDP_SSO_URL or use OIDC.' });
+      return;
+    }
+    const state = randomToken(16);
+    await db.run('INSERT INTO oauth_states (state, created_at, org_id, purpose) VALUES (?, ?, ?, ?)', [state, nowIso(), String(req.query.org || ''), 'saml']);
+    const url = new URL(config.saml.idpSsoUrl);
+    url.searchParams.set('RelayState', state);
+    res.redirect(url.toString());
+  });
+
+  router.post('/auth/saml/acs', express.urlencoded({ extended: false }), async (req, res) => {
+    if (!config.saml.idpSsoUrl) {
+      res.status(501).send('SAML is not configured');
+      return;
+    }
+    const relay = String(req.body?.RelayState || '');
+    const saved = await db.get<{ org_id: string | null }>('SELECT org_id FROM oauth_states WHERE state = ?', [relay]);
+    const encoded = String(req.body?.SAMLResponse || '');
+    if (!saved || !encoded) {
+      res.status(400).send('Invalid SAML response');
+      return;
+    }
+    await db.run('DELETE FROM oauth_states WHERE state = ?', [relay]);
+    let xml = '';
+    try {
+      xml = Buffer.from(encoded, 'base64').toString('utf8');
+    } catch {
+      res.status(400).send('Invalid SAMLResponse encoding');
+      return;
+    }
+    if (config.saml.idpCert && !xml.includes('Signature')) {
+      res.status(401).send('Signed SAML assertions are required');
+      return;
+    }
+    const nameId = xml.match(/<(?:[\w]+:)?NameID[^>]*>([^<]+)<\/(?:[\w]+:)?NameID>/)?.[1];
+    if (!nameId) {
+      res.status(401).send('SAML NameID missing');
+      return;
+    }
+    const org = saved.org_id
+      ? await db.get<{ id: string }>('SELECT id FROM orgs WHERE id = ?', [saved.org_id])
+      : await db.get<{ id: string }>('SELECT id FROM orgs LIMIT 1');
+    if (!org) {
+      res.status(409).send('Complete organization setup before SAML login');
+      return;
+    }
+    let user = await db.get<Record<string, unknown>>('SELECT * FROM users WHERE username = ? AND org_id = ?', [nameId, org.id]);
+    if (!user) {
+      const userId = randomId('user');
+      await db.run(
+        `INSERT INTO users (id, org_id, username, email, full_name, role, permissions, password_hash, is_active, failed_login_attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'viewer', ?, ?, 1, 0, ?, ?)`,
+        [userId, org.id, nameId, nameId, nameId, JSON.stringify(ROLE_PERMISSIONS.viewer), await bcrypt.hash(randomToken(), 12), nowIso(), nowIso()]
+      );
+      user = await db.get<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [userId]);
+    }
+    const sessionId = randomId('session');
+    const expires = new Date(Date.now() + config.sessionHours * 3600 * 1000).toISOString();
+    await db.run('INSERT INTO sessions (id, user_id, created_at, expires_at, is_active, last_activity) VALUES (?, ?, ?, ?, 1, ?)', [sessionId, String(user!.id), nowIso(), expires, nowIso()]);
+    const jwtToken = signToken({ id: String(user!.id), username: String(user!.username), role: String(user!.role), orgId: String(user!.org_id) }, sessionId, false);
+    res.redirect(`${config.webOrigin}/login?sso=${encodeURIComponent(jwtToken)}`);
+  });
+
   return router;
 }
 
-function summarizeServices(orgId: string) {
+async function summarizeServices(orgId: string) {
   const db = getDb();
-  const integrations = db.all<{ type: string; status: string; last_sync: string | null; error: string | null }>(
+  const integrations = await db.all<{ type: string; status: string; last_sync: string | null; error: string | null }>(
     'SELECT type, status, last_sync, error FROM integrations WHERE org_id = ?',
     [orgId]
   );

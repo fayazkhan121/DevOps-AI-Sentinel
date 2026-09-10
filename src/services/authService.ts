@@ -1,10 +1,13 @@
 import { User, UserSession, AuditLog } from '../types';
+import { API_CONFIG } from '@/config/api';
 import { apiFetch, clearSession, getToken, setSession } from '@/lib/apiClient';
 
 export interface LoginCredentials {
   username: string;
   password: string;
   rememberMe?: boolean;
+  org?: string;
+  totp?: string;
 }
 
 export interface AuthResponse {
@@ -12,6 +15,8 @@ export interface AuthResponse {
   user?: User;
   token?: string;
   message?: string;
+  requiresTotp?: boolean;
+  orgs?: Array<{ id: string; name: string }>;
 }
 
 export interface UserProfile {
@@ -80,10 +85,12 @@ export class AuthService {
 
   async login(credentials: LoginCredentials): Promise<AuthResponse> {
     try {
-      const data = await apiFetch<AuthResponse>('/auth/login', {
+      const response = await fetch(`${API_CONFIG.API_URL}/auth/login`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(credentials),
       });
+      const data = (await response.json()) as AuthResponse;
       if (data.success && data.token && data.user) {
         this.persist(data.token, data.user);
       }

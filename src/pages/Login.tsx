@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Eye, EyeOff, Shield, Database, Cloud, Server, RefreshCw } from "lucide-react";
+import { Eye, EyeOff, Shield, Database, Cloud, Server } from "lucide-react";
 import { authService } from "@/services/authService";
 import { apiFetch } from "@/lib/apiClient";
 
@@ -12,6 +12,9 @@ const Login = () => {
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [org, setOrg] = useState("");
+  const [totp, setTotp] = useState("");
+  const [requiresTotp, setRequiresTotp] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -63,28 +66,19 @@ const Login = () => {
     }
   };
 
-  const clearDataAndReset = async () => {
-    try {
-      await authService.logout();
-      setIsFirstTimeSetup(await authService.needsSetup());
-      setError('');
-    } catch (error) {
-      console.error('Failed to reset system:', error);
-      setError('Failed to reset system');
-    }
-  };
-
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError("");
 
     try {
-      const response = await authService.login({ username, password, rememberMe });
+      const response = await authService.login({ username, password, rememberMe, org: org || undefined, totp: totp || undefined });
       
       if (response.success) {
-        // Redirect to dashboard (authService already stores the data)
         navigate('/', { replace: true });
+      } else if (response.requiresTotp) {
+        setRequiresTotp(true);
+        setError(response.message || 'Enter your authenticator code');
       } else {
         setError(response.message || 'Login failed');
       }
@@ -370,6 +364,15 @@ const Login = () => {
         <CardContent>
           <form onSubmit={handleLogin} className="space-y-4">
             <div className="space-y-2">
+              <Label htmlFor="org">Organization</Label>
+              <Input
+                id="org"
+                value={org}
+                onChange={(e) => setOrg(e.target.value)}
+                placeholder="Optional org name or id"
+              />
+            </div>
+            <div className="space-y-2">
               <Label htmlFor="username">Username</Label>
               <Input
                 id="username"
@@ -401,6 +404,19 @@ const Login = () => {
                 </Button>
               </div>
             </div>
+            {requiresTotp && (
+              <div className="space-y-2">
+                <Label htmlFor="totp">Authenticator code</Label>
+                <Input
+                  id="totp"
+                  value={totp}
+                  onChange={(e) => setTotp(e.target.value)}
+                  placeholder="6-digit code"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                />
+              </div>
+            )}
             
             {error && (
               <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-md">
@@ -425,43 +441,6 @@ const Login = () => {
                {isLoading ? "Signing in..." : "Sign In"}
              </Button>
           </form>
-
-          <div className="mt-6 space-y-4">
-            <div className="text-center">
-              <p className="text-sm text-muted-foreground">
-                Default credentials: admin / admin
-              </p>
-            </div>
-            
-            {/* Debug and Reset buttons for testing */}
-            <div className="text-center space-y-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  const users = JSON.parse(localStorage.getItem('users') || '[]');
-                  const config = localStorage.getItem('system_config');
-                  console.log('Current localStorage state:', { users, config });
-                  alert(`Users: ${users.length}, Config: ${config ? 'Yes' : 'No'}`);
-                }}
-                className="text-xs"
-              >
-                Debug: Check localStorage
-              </Button>
-              
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={clearDataAndReset}
-                className="text-xs"
-              >
-                <RefreshCw className="h-3 w-3 mr-1" />
-                Reset System (Clear Data)
-              </Button>
-            </div>
-          </div>
         </CardContent>
       </Card>
     </div>

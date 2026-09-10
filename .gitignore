@@ -18,6 +18,7 @@ data/*.sqlite
 data/*.db
 data/*.sqlite-wal
 data/*.sqlite-shm
+data/backups/
 *.db
 *.sqlite
 

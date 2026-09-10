@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { authService, UserProfile } from '@/services/authService';
 import { advancedDatabase } from '@/services/advancedDatabase';
+import { apiFetch } from '@/lib/apiClient';
 
 interface UserFormData {
   username: string;
@@ -42,6 +43,12 @@ const UserManagement: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>('');
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [showInviteDialog, setShowInviteDialog] = useState(false);
+  const [inviteForm, setInviteForm] = useState<{ email: string; role: 'admin' | 'user' | 'viewer' }>({
+    email: '',
+    role: 'user',
+  });
+  const [inviteResult, setInviteResult] = useState<{ token?: string; message?: string } | null>(null);
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [userFormData, setUserFormData] = useState<UserFormData>({
     username: '',
@@ -91,6 +98,32 @@ const UserManagement: React.FC = () => {
       setActivityLogs(logs);
     } catch (error) {
       console.error('Failed to load activity logs:', error);
+    }
+  };
+
+  const handleInviteUser = async () => {
+    try {
+      if (!inviteForm.email) {
+        setError('Email is required');
+        return;
+      }
+
+      const data = await apiFetch<{ token?: string; message?: string }>('/users/invite', {
+        method: 'POST',
+        body: JSON.stringify({ email: inviteForm.email, role: inviteForm.role }),
+      });
+
+      setError('');
+      if (data.token || data.message) {
+        setInviteResult({ token: data.token, message: data.message });
+      } else {
+        setShowInviteDialog(false);
+        setInviteForm({ email: '', role: 'user' });
+        setInviteResult(null);
+      }
+    } catch (error) {
+      console.error('Failed to invite user:', error);
+      setError(error instanceof Error ? error.message : 'Failed to invite user');
     }
   };
 
@@ -228,6 +261,87 @@ const UserManagement: React.FC = () => {
             Manage users, roles, and permissions for the platform
           </p>
         </div>
+        <div className="flex items-center space-x-2">
+        <Dialog
+          open={showInviteDialog}
+          onOpenChange={(open) => {
+            setShowInviteDialog(open);
+            if (!open) {
+              setInviteForm({ email: '', role: 'user' });
+              setInviteResult(null);
+            }
+          }}
+        >
+          <DialogTrigger asChild>
+            <Button variant="outline">Invite User</Button>
+          </DialogTrigger>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Invite User</DialogTitle>
+              <DialogDescription>
+                Send an invite with an email and role.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div>
+                <Label htmlFor="invite-email">Email</Label>
+                <Input
+                  id="invite-email"
+                  type="email"
+                  value={inviteForm.email}
+                  onChange={(e) => setInviteForm(prev => ({ ...prev, email: e.target.value }))}
+                  placeholder="Enter email"
+                  disabled={Boolean(inviteResult)}
+                />
+              </div>
+              <div>
+                <Label htmlFor="invite-role">Role</Label>
+                <Select
+                  value={inviteForm.role}
+                  onValueChange={(value: 'admin' | 'user' | 'viewer') =>
+                    setInviteForm(prev => ({ ...prev, role: value }))
+                  }
+                  disabled={Boolean(inviteResult)}
+                >
+                  <SelectTrigger id="invite-role">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="admin">Administrator</SelectItem>
+                    <SelectItem value="user">User</SelectItem>
+                    <SelectItem value="viewer">Viewer</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {inviteResult?.message && (
+                <p className="text-sm">{inviteResult.message}</p>
+              )}
+              {inviteResult?.token && (
+                <div>
+                  <Label htmlFor="invite-token">Token</Label>
+                  <Input id="invite-token" value={inviteResult.token} readOnly />
+                </div>
+              )}
+              <div className="flex space-x-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setShowInviteDialog(false);
+                    setInviteForm({ email: '', role: 'user' });
+                    setInviteResult(null);
+                  }}
+                >
+                  Cancel
+                </Button>
+                {!inviteResult && (
+                  <Button onClick={handleInviteUser}>
+                    Send invite
+                  </Button>
+                )}
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
         <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
           <DialogTrigger asChild>
             <Button className="flex items-center space-x-2">
@@ -310,6 +424,7 @@ const UserManagement: React.FC = () => {
             </div>
           </DialogContent>
         </Dialog>
+        </div>
       </div>
 
       {/* Error Alert */}

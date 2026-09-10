@@ -48,6 +48,10 @@ test('health endpoint does not require auth', async () => {
   const { status, body } = await json('/api/health');
   assert.equal(status, 200);
   assert.equal(body.status, 'ok');
+  const methods = await json('/api/auth/methods');
+  assert.equal(methods.status, 200);
+  assert.equal(methods.body.github, false);
+  assert.equal(methods.body.oidc, false);
 });
 
 test('setup, login, metrics, and rbac', async () => {
@@ -243,8 +247,20 @@ test('orgs, TOTP, invite, reset, settings isolation, and sqlite restore', async 
       adminEmail: 'beta@example.com',
     }),
   });
-  assert.equal(orgB.status, 201, JSON.stringify(orgB.body));
-  const tokenB = orgB.body.token as string;
+  assert.equal(orgB.status, 401);
+
+  const orgBAuth = await json('/api/orgs', {
+    method: 'POST',
+    headers: headersA,
+    body: JSON.stringify({
+      name: 'Beta Corp',
+      adminUsername: 'admin',
+      adminPassword: 'beta-secret-pass',
+      adminEmail: 'beta@example.com',
+    }),
+  });
+  assert.equal(orgBAuth.status, 201, JSON.stringify(orgBAuth.body));
+  const tokenB = orgBAuth.body.token as string;
   const headersB = { Authorization: `Bearer ${tokenB}` };
 
   const ambiguous = await json('/api/auth/login', {
@@ -289,6 +305,8 @@ test('orgs, TOTP, invite, reset, settings isolation, and sqlite restore', async 
   assert.equal(restore.status, 200, JSON.stringify(restore.body));
   const restored = await json('/api/settings', { headers: headersA });
   assert.equal(restored.body.settings?.marker, 'before-backup');
+  const stillB = await json('/api/settings', { headers: headersB });
+  assert.equal(stillB.body.settings?.marker, 'beta-only');
 
   const invite = await json('/api/users/invite', {
     method: 'POST',

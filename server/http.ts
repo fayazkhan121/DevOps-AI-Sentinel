@@ -6,7 +6,7 @@ import { getDb, nowIso, parseJson, type DbAdapter } from './db.ts';
 import { encryptJson, decryptJson, randomId, sha256, randomToken } from './crypto.ts';
 import { requireAuth, requirePermission, requireRole, clientMeta, type AuthedRequest } from './middleware.ts';
 import { collectAllMetrics, persistMetrics, overviewFromMetrics, collectHostMetrics, probeDatabase, normalizeIntegrationConfig } from './collectors.ts';
-import { evaluateAlerts, testChannel } from './alerting.ts';
+import { evaluateAlerts, testChannel, sendSystemEmail } from './alerting.ts';
 import { clusterLogs, detectValueAnomalies } from './anomaly.ts';
 import { provisionOrg, findLoginUsers, publicUser as tenantPublicUser, upsertSetting, orgWantsHostMetrics } from './tenancy.ts';
 import { generateTotpSecret, verifyTotp, totpOtpauthUrl } from './totp.ts';
@@ -201,6 +201,15 @@ export function createRouter(): express.Router {
     res.json({
       success: true,
       token: signToken({ id: req.user!.id, username: req.user!.username, role: req.user!.role, orgId: req.user!.orgId }, req.user!.sessionId, false),
+    });
+  });
+
+  router.get('/auth/methods', (_req, res) => {
+    res.json({
+      github: Boolean(config.githubOauth.clientId),
+      oidc: Boolean(config.oidc.issuer && config.oidc.clientId),
+      saml: Boolean(config.saml.idpSsoUrl),
+      smtp: Boolean(config.smtp.host && config.smtp.user),
     });
   });
 
@@ -725,6 +734,11 @@ export function createRouter(): express.Router {
     res.status(201).json({ success: true });
   });
 
+  router.delete('/settings/ip-allowlist/:id', requireAuth, requireRole('admin'), async (req: AuthedRequest, res) => {
+    await db.run('DELETE FROM ip_allowlist WHERE id = ? AND org_id = ?', [req.params.id, req.user!.orgId]);
+    res.json({ success: true });
+  });
+
   router.get('/anomalies', requireAuth, requirePermission('monitoring:read'), async (req: AuthedRequest, res) => {
     const series = (await db.all<{ value: number; timestamp: string }>(
       `SELECT value, timestamp FROM metrics WHERE org_id = ? AND name = 'cpu_usage' ORDER BY timestamp DESC LIMIT 120`,
@@ -808,7 +822,7 @@ export function createRouter(): express.Router {
     res.json({ success: true, org });
   });
 
-  router.post('/orgs', async (req, res) => {
+  router.post('/orgs', requireAuth, requireRole('admin'), async (req: AuthedRequest, res) => {
     const { name, adminUsername, adminPassword, adminEmail, adminFullName, collectHostMetrics } = req.body || {};
     if (!name || !adminUsername || !adminPassword || String(adminPassword).length < 8) {
       res.status(400).json({ success: false, message: 'name, adminUsername, and adminPassword (8+ characters) are required' });
@@ -884,10 +898,17 @@ export function createRouter(): express.Router {
       [id, req.user!.orgId, email, role, sha256(token), req.user!.id, new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(), nowIso()]
     );
     await audit(req.user!.orgId, req.user!.id, 'user_invited', `Invited ${email}`, req);
+    const origin = config.webOrigin.replace(/\/$/, '');
+    const emailed = await sendSystemEmail(
+      email,
+      'Invitation to DevOps AI Sentinel',
+      `You were invited to ${origin}. Role: ${role}. Use Login → Accept invite with this token:\n${token}`
+    );
     res.status(201).json({
       success: true,
       id,
-      ...(config.env !== 'production' ? { token } : {}),
+      message: emailed ? 'Invite email sent' : 'Invite saved; SMTP is not configured so email was not sent',
+      ...(config.env !== 'production' || !emailed ? { token } : {}),
     });
   });
 
@@ -930,12 +951,19 @@ export function createRouter(): express.Router {
         'INSERT INTO password_resets (id, user_id, org_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
         [randomId('reset'), String(user.id), String(user.org_id), sha256(token), new Date(Date.now() + 2 * 3600 * 1000).toISOString(), nowIso()]
       );
+      const emailed = user?.email
+        ? await sendSystemEmail(
+          String(user.email),
+          'Password reset',
+          `Reset your DevOps AI Sentinel password with this token:\n${token}`
+        )
+        : false;
       if (config.env !== 'production') {
-        res.json({ success: true, token });
+        res.json({ success: true, token, message: emailed ? 'Reset email sent' : 'Reset token issued; SMTP is not configured' });
         return;
       }
     }
-    res.json({ success: true });
+    res.json({ success: true, message: 'If the account exists, a reset was created' });
   });
 
   router.post('/auth/reset-password', async (req, res) => {

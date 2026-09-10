@@ -100,6 +100,58 @@ export class AuthService {
     }
   }
 
+  async getAuthMethods(): Promise<{ github: boolean; oidc: boolean; saml: boolean; smtp: boolean }> {
+    try {
+      return await apiFetch<{ github: boolean; oidc: boolean; saml: boolean; smtp: boolean }>('/auth/methods');
+    } catch {
+      return { github: false, oidc: false, saml: false, smtp: false };
+    }
+  }
+
+  async forgotPassword(payload: { username: string; org?: string }): Promise<{ success: boolean; token?: string; message?: string }> {
+    try {
+      return await apiFetch<{ success: boolean; token?: string; message?: string }>('/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      return { success: false, message: error instanceof Error ? error.message : 'Request failed' };
+    }
+  }
+
+  async resetPassword(payload: { token: string; password: string }): Promise<{ success: boolean; message?: string }> {
+    try {
+      return await apiFetch<{ success: boolean; message?: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      return { success: false, message: error instanceof Error ? error.message : 'Request failed' };
+    }
+  }
+
+  async inviteUser(payload: { email: string; role?: string }): Promise<{ success: boolean; id?: string; token?: string; message?: string }> {
+    try {
+      return await apiFetch<{ success: boolean; id?: string; token?: string; message?: string }>('/users/invite', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      return { success: false, message: error instanceof Error ? error.message : 'Request failed' };
+    }
+  }
+
+  async acceptInvite(payload: { token: string; username: string; password: string; fullName?: string }): Promise<{ success: boolean; id?: string; message?: string }> {
+    try {
+      return await apiFetch<{ success: boolean; id?: string; message?: string }>('/auth/accept-invite', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      return { success: false, message: error instanceof Error ? error.message : 'Request failed' };
+    }
+  }
+
   async logout(): Promise<void> {
     try {
       await apiFetch('/auth/logout', { method: 'POST' });

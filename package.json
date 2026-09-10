@@ -15,7 +15,7 @@
     "test": "NODE_ENV=test JWT_SECRET=test-jwt-secret-key-min-16 ENCRYPTION_KEY=test-enc-secret-key-16 SQLITE_PATH=data/test.sqlite node --experimental-strip-types --test --test-concurrency=1 tests/*.test.ts",
     "test:watch": "node --experimental-strip-types --test --watch tests/*.test.ts",
     "test:coverage": "NODE_ENV=test JWT_SECRET=test-jwt-secret-key-min-16 ENCRYPTION_KEY=test-enc-secret-key-16 SQLITE_PATH=data/test.sqlite node --experimental-strip-types --test --experimental-test-coverage --test-concurrency=1 tests/*.test.ts",
-    "test:integration": "npm test",
+    "test:postgres": "NODE_ENV=test JWT_SECRET=test-jwt-secret-key-min-16 ENCRYPTION_KEY=test-enc-secret-key-16 node --experimental-strip-types --test --test-concurrency=1 tests/postgres.test.ts",
     "test:e2e": "npm test"
   },
   "dependencies": {

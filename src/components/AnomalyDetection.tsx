@@ -2,6 +2,8 @@ import { AlertCircle, ArrowRight, Brain, TrendingUp } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { useToast } from "./ui/use-toast";
 import { Button } from "./ui/button";
+import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/apiClient";
 
 interface AnomalyItem {
   title: string;
@@ -23,74 +25,35 @@ interface AnomalyItem {
   };
 }
 
-const anomalies: AnomalyItem[] = [
-  {
-    title: "Unusual spike in error rates",
-    affected: "API Gateway, Auth Service",
-    rootCause: "Database connection pool exhaustion",
-    confidence: 92,
-    severity: "high",
-    actions: [
-      "Increase connection pool size",
-      "Implement connection pooling metrics",
-      "Review query optimization"
-    ],
-    mlInsights: [
-      "Pattern matches previous incidents from last month",
-      "85% correlation with high traffic periods",
-      "Similar to known DDoS attack patterns"
-    ],
-    trends: [
-      {
-        metric: "Error Rate",
-        change: 150,
-        timeframe: "Last 1 hour"
-      },
-      {
-        metric: "Response Time",
-        change: 75,
-        timeframe: "Last 30 minutes"
-      }
-    ],
-    prediction: {
-      likelihood: 85,
-      timeframe: "Next 2 hours",
-      impact: "High risk of service degradation"
-    }
-  },
-  {
-    title: "Memory usage anomaly detected",
-    affected: "Worker Nodes",
-    rootCause: "Memory leak in processing service",
-    confidence: 87,
-    severity: "medium",
-    actions: [
-      "Restart affected services",
-      "Review memory allocation",
-      "Update monitoring thresholds"
-    ],
-    mlInsights: [
-      "Gradual increase pattern detected",
-      "90% similar to known memory leak signatures",
-      "Predicted to reach critical levels in 2 hours"
-    ],
-    trends: [
-      {
-        metric: "Memory Usage",
-        change: 45,
-        timeframe: "Last 2 hours"
-      }
-    ],
-    prediction: {
-      likelihood: 78,
-      timeframe: "Next 4 hours",
-      impact: "Moderate risk of performance degradation"
-    }
-  }
-];
-
 export function AnomalyDetection() {
   const { toast } = useToast();
+  const [anomalies, setAnomalies] = useState<AnomalyItem[]>([]);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const data = await apiFetch<{ anomalies: Array<{ value: number; timestamp: string; zScore: number; isAnomaly: boolean; severity: 'low' | 'medium' | 'high' }>; sampleSize: number }>('/anomalies');
+        setAnomalies((data.anomalies || []).map((point) => ({
+          title: `CPU usage anomaly (z=${point.zScore.toFixed(2)})`,
+          affected: 'host collector',
+          rootCause: `Value ${point.value}% departed from the recent ${data.sampleSize}-sample baseline.`,
+          confidence: Math.min(99, Math.round(point.zScore * 20)),
+          severity: point.severity,
+          actions: ['Inspect host load', 'Review recent deployments'],
+          mlInsights: [`Z-score ${point.zScore.toFixed(2)} on cpu_usage`, 'Statistical detector (rolling mean / stddev)'],
+          trends: [{ metric: 'CPU Usage', change: Math.round(point.value), timeframe: point.timestamp }],
+          prediction: {
+            likelihood: Math.min(99, Math.round(point.zScore * 15)),
+            timeframe: 'Next collection window',
+            impact: point.severity === 'high' ? 'Host saturation risk' : 'Elevated resource usage',
+          },
+        })));
+      } catch (error) {
+        console.error('Failed to load anomalies', error);
+      }
+    };
+    void load();
+  }, []);
 
   return (
     <Card>

@@ -1,193 +1,47 @@
-# DevOps AI Sentinel - Complete Features Summary
+# Features (honest)
 
-## 🎯 **Project Overview**
-DevOps AI Sentinel is now a **comprehensive, enterprise-grade monitoring and alerting platform** with real-time capabilities, professional UI, and extensive integrations.
+React UI plus Express API (`server/`). Application DB is SQLite by default, or PostgreSQL when `DATABASE_TYPE=postgres` (`pg.Pool`). The setup wizard does not choose the app DB; the environment does.
 
----
+## Implemented on the API
+- bcrypt + JWT, lockout, RBAC, audit log, optional IP allowlist, TOTP
+- GitHub OAuth and OIDC when configured. SAML ACS is NameID-only and is not XML-DSig verified — use OIDC
+- AES-256-GCM for stored integration secrets
+- First org: `POST /api/setup`. Additional orgs: authenticated admin `POST /api/orgs`
+- Settings PK `(org_id, key)`. Usernames unique per org. Socket.IO rooms `org:<id>`
+- Host metrics from the API process (CPU, memory, disk, network, load, uptime)
+- Remote agent ingest (`agent/collect.mjs`), including `agent_cpu_usage`
+- Cloud collectors only with credentials:
+  - AWS: EC2 inventory, CloudWatch CPU, Cost Explorer, CloudWatch utilization for RDS/Lambda/ALB/S3 when datapoints exist
+  - Azure: running VM count via ARM
+  - GCP: running instance count
+- Kubernetes when configured: pod/node inventory plus node CPU/memory from metrics-server
+- Other collectors when configured: Docker, Jenkins, Git, Prometheus PromQL, Terraform, Ansible, database probes
+- Metric retention default 90 days (`METRICS_RETENTION_DAYS` 7–365)
+- Alert rules + SMTP / Slack / Discord / Telegram / webhook / Twilio when configured
+- Dashboard CRUD, export/import
+- Org-scoped JSON snapshots via `/api/backups` (not per-tenant filesystem snapshots or physical Postgres dumps)
+- Invite and password-reset tokens hashed; email sent when SMTP is configured
+- Compliance report JSON/CSV
+- Rate limiting, Helmet, CORS
+- Docker Compose requires `JWT_SECRET` and `ENCRYPTION_KEY`; optional profiles `postgres` and `tls`
+- GitHub Actions CI: unit/API tests plus a PostgreSQL job (`npm run test:postgres`)
 
-## ✅ **Completed Enhancements**
+## UI
+- Screens call `/api`. A session token may be stored in localStorage; there is no IndexedDB/localStorage fake application database
+- Unused mock, security-scan, and cost-optimization services are removed. Stub Security/Cost UI is not shipped
+- Overview KPIs, alerts, graphs, anomalies, and service health bind to API data
+- First-time setup creates the first org admin on the server (password ≥ 8 characters)
+- User Management includes a create-organization dialog (`POST /api/orgs`)
 
-### 🎨 **1. Enhanced Color Scheme & UI**
-- **Professional Color Palette**: Modern blue-based primary colors with proper contrast
-- **Status-Specific Colors**: Green for success, amber for warnings, red for critical states
-- **Chart Color System**: Consistent 6-color palette for data visualization
-- **Dark Mode Support**: Complete dark/light theme with proper color mappings
-- **Real-time Animations**: Pulse effects, live indicators, loading states
-- **Responsive Design**: Mobile-first approach with proper breakpoints
+## Not a native mobile app
+The web UI is installable as a PWA (`public/manifest.json`). There is no iOS/Android binary.
 
-### 🌐 **2. Real Cloud Integrations**
-- **AWS SDK Integration**: EC2, CloudWatch, Cost Explorer with real metrics collection
-- **Azure Identity**: Secure authentication with ClientSecretCredential
-- **Google Cloud**: Project-based authentication (simulated for browser compatibility)
-- **Real-time Metrics**: Live CPU, memory, network, and cost data from cloud providers
-- **Connection Management**: Add, configure, test, and monitor cloud connections
-- **Automatic Reconnection**: Handles connection failures and retries
+## Cloud data
+If a provider is not configured, that provider shows as disconnected and contributes no fake inventory.
 
-### 🗄️ **3. Database Connectivity**
-- **Multi-Database Support**: PostgreSQL, MySQL, MongoDB, Redis integration
-- **Browser-Compatible Storage**: IndexedDB, localStorage, in-memory fallback
-- **Connection Pooling**: Efficient database connection management
-- **Real-time Database Metrics**: Active connections, query performance, storage usage
-- **Configuration Management**: Secure credential storage and connection testing
-
-### 📊 **4. Real-Time Dashboard**
-- **Three Dashboard Views**: System Overview, Real-Time Dashboard, Advanced Analytics
-- **Live Data Streams**: Real-time metrics from all connected sources
-- **Interactive Charts**: Line charts, area charts, bar charts with live updates
-- **Status Indicators**: Health, security, cost, and infrastructure status
-- **Connection Monitor**: Live view of all active connections and their status
-- **Alert Stream**: Real-time alert feed with severity indicators
-
-### 🚨 **5. Advanced Alerting System**
-- **Multi-Channel Notifications**: Email (SMTP), Slack webhooks, custom webhooks
-- **Complex Alert Rules**: Threshold-based, duration-based, and custom conditions
-- **Escalation Policies**: Multi-level escalation with configurable delays
-- **Alert Management**: Acknowledge, resolve, and track alert lifecycle
-- **Notification Templates**: Customizable alert message formatting
-- **Channel Testing**: Verify notification channels before deployment
-
-### ⚙️ **6. DevOps Tool Integration**
-- **Kubernetes**: Pod monitoring, node health, resource utilization
-- **Docker**: Container metrics, image management, real-time stats
-- **Jenkins**: Build status, job monitoring, pipeline health
-- **Git Platforms**: GitHub, GitLab, Bitbucket, Azure DevOps integration
-- **Real-time Monitoring**: Live metrics from all DevOps tools
-- **Configuration Management**: Secure credential storage and connection testing
-
-### 🔐 **7. Security & Compliance**
-- **Real-time Security Monitoring**: Vulnerability scanning, threat detection
-- **Compliance Checking**: Automated compliance rule evaluation
-- **Secret Scanning**: Code and configuration secret detection
-- **Threat Intelligence**: Real-time threat feed integration
-- **Security Metrics**: Security posture tracking and reporting
-- **Event Logging**: Comprehensive security event audit trail
-- **User Authentication & Authorization**: Secure login system with role-based access control
-- **Session Management**: Secure session handling with automatic expiration
-- **Password Security**: Secure password hashing and validation
-- **Account Lockout**: Protection against brute force attacks
-
-### 💰 **8. Cost Management**
-- **Real-time Cost Tracking**: Live spend monitoring across all cloud providers
-- **Budget Management**: Budget creation, tracking, and alerting
-- **Cost Optimization**: Automated recommendations and savings identification
-- **Trend Analysis**: Historical cost analysis and forecasting
-- **Resource Cost Mapping**: Per-resource cost attribution
-- **Savings Tracking**: Monitor implemented cost optimizations
-
-### 🔄 **9. Performance Optimization**
-- **Efficient Data Collection**: Optimized polling intervals and data aggregation
-- **Connection Pooling**: Reusable database and API connections
-- **Memory Management**: Proper cleanup and garbage collection
-- **UI Responsiveness**: Smooth animations and lazy loading
-- **Background Processing**: Non-blocking operations for better UX
-- **Caching Strategies**: Intelligent data caching for faster response times
-
-### 👥 **10. User Management & Administration**
-- **Multi-User System**: Support for multiple users with different roles
-- **Role-Based Access Control**: Admin, User, and Viewer roles with granular permissions
-- **User Profile Management**: Users can update their profile information and change passwords
-- **Admin User Management**: Administrators can create, edit, and delete user accounts
-- **Activity Logging**: Comprehensive audit trail of all user actions
-- **Session Management**: Secure session handling with automatic cleanup
-- **Default Admin Setup**: Automatic creation of admin user (admin/admin) on first run
-- **Password Security**: Secure password hashing and validation with account lockout protection
-
----
-
-## 🏗️ **Technical Architecture**
-
-### **Service Layer**
-- `realTimeConnectionService`: Manages all external connections and real-time data
-- `advancedDatabase`: Multi-database abstraction layer
-- `cloudMonitoring`: Cloud provider metrics collection
-- `devopsIntegrations`: DevOps tool monitoring
-- `advancedAlerting`: Intelligent alerting and notification system
-- `advancedSecurity`: Security monitoring and compliance
-- `advancedCostManagement`: Cost tracking and optimization
-- `advancedMonitoring`: System health and performance monitoring
-- `advancedDashboardService`: Dashboard and widget management
-- `authService`: User authentication, authorization, and session management
-
-### **Frontend Components**
-- `RealTimeDashboard`: Live monitoring with real-time updates
-- `AdvancedDashboard`: Comprehensive analytics and insights
-- `AdvancedSettingsPanel`: Configuration interface for all integrations
-- `UserManagement`: Admin interface for managing users and roles
-- `UserProfileComponent`: User profile management and password changes
-- `ProtectedRoute`: Authentication and authorization wrapper
-- `Login`: Professional login page with first-time setup
-- Enhanced existing components with real-time capabilities
-
-### **Data Flow**
-1. **Connection Services** collect metrics from external sources
-2. **Database Services** store and retrieve historical data
-3. **Monitoring Services** analyze data and trigger alerts
-4. **UI Components** display real-time information with live updates
-5. **Alerting Services** deliver notifications through configured channels
-
----
-
-## 📋 **Configuration & Setup**
-
-### **Environment Configuration**
-- Complete `env.example` file with all necessary credentials
-- Support for AWS, Azure, GCP, databases, email, Slack, and DevOps tools
-- Configurable thresholds, intervals, and feature toggles
-
-### **Real-Life Integration Steps**
-1. **Cloud Providers**: Configure IAM roles, service accounts, and API keys
-2. **Databases**: Set up connection strings and authentication
-3. **Email/SMTP**: Configure mail server settings and templates
-4. **Slack**: Create Slack apps and configure webhooks
-5. **DevOps Tools**: Set up API tokens and service accounts
-6. **Security**: Configure encryption keys and JWT secrets
-
----
-
-## 🚀 **Key Features Highlights**
-
-### **Real-Time Capabilities**
-- ⚡ Live data streaming from all connected sources
-- 🔄 Automatic connection recovery and retry logic
-- 📊 Real-time charts and metrics visualization
-- 🚨 Instant alert notifications and status updates
-- 🔗 Live connection status monitoring
-
-### **Professional UI/UX**
-- 🎨 Modern, professional design without emojis
-- 📱 Fully responsive across all device sizes
-- 🌙 Complete dark/light mode support
-- ⚡ Smooth animations and loading states
-- 🎯 Intuitive navigation and user flows
-
-### **Enterprise-Grade Features**
-- 🔐 Secure credential management and encryption
-- 📈 Comprehensive monitoring and alerting
-- 🔄 High availability and automatic recovery
-- 📊 Advanced analytics and cost optimization
-- 🛡️ Security monitoring and compliance checking
-
-### **Scalability & Performance**
-- ⚡ Optimized for real-time data processing
-- 🔄 Efficient connection pooling and resource management
-- 📊 Intelligent data aggregation and caching
-- 🎯 Modular architecture for easy extension
-- 🚀 Production-ready performance optimizations
-
----
-
-## 🎉 **Final Status**
-✅ **ALL REQUIREMENTS COMPLETED**
-
-The DevOps AI Sentinel is now a **fully-featured, enterprise-grade monitoring platform** with:
-- Real-time monitoring across clouds, databases, and DevOps tools
-- Professional UI with advanced color scheme and animations
-- Comprehensive alerting with multiple notification channels
-- Cost management and security monitoring
-- **Complete user management system with authentication and authorization**
-- **Role-based access control and activity logging**
-- **Secure session management and password protection**
-- High performance and scalability
-- Production-ready with real-life integrations
-
-The application is **ready for production deployment** and can be immediately used for real-world monitoring scenarios.
+## Remaining (not in this product)
+- Native iOS/Android
+- XML-DSig SAML (use OIDC)
+- Vulnerability scanning / cost-optimization engines
+- HA, SCIM
+- Per-tenant physical Postgres dumps

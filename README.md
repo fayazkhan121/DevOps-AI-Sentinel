@@ -1,4 +1,4 @@
-# DevOps AI Sentinel - Enterprise Monitoring & Alerting Platform
+# DevOps AI Sentinel
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://www.typescriptlang.org/)
@@ -7,402 +7,154 @@
 
 ## Overview
 
-DevOps AI Sentinel is a comprehensive, enterprise-grade monitoring and alerting platform designed for modern DevOps teams. It provides real-time monitoring of cloud infrastructure, DevOps tools, applications, and services with advanced alerting, intelligent dashboards, and seamless integrations.
+DevOps AI Sentinel is a React UI plus an Express API in `server/`.
+
+- The API owns authentication, metric collection, alert evaluation, and notification delivery.
+- Application database: SQLite by default; PostgreSQL when `DATABASE_TYPE=postgres` (`pg.Pool`). The setup wizard does not pick the app DB — set it in the environment (`env.example`).
+- The UI talks to `/api` and Socket.IO. It does not store passwords or cloud secrets in the browser. There is no IndexedDB/localStorage fake application database.
+- Host CPU/memory/disk/network metrics come from the API process (optional remote ingest via `agent/collect.mjs`, including `agent_cpu_usage`). Cloud collectors run only when credentials are saved.
+- The web UI is a PWA (`public/manifest.json`). There are no iOS or Android binaries.
 
 ## Key Features
 
-### **Multi-Cloud Monitoring**
-- **AWS Integration**: EC2, CloudWatch, RDS, Lambda, and more
-- **Azure Integration**: Virtual Machines, App Services, SQL Database
-- **GCP Integration**: Compute Engine, Cloud Functions, BigQuery
-- **Real-time Metrics**: CPU, memory, network, storage, and cost monitoring
-- **Resource Inventory**: Automatic discovery and tracking of cloud resources
+### Multi-cloud and host metrics
+- AWS (when access keys are set): EC2 inventory, CloudWatch CPU, Cost Explorer, CloudWatch utilization for RDS/Lambda/ALB/S3 when datapoints exist
+- Azure: running VM count via ARM when a service principal is configured
+- GCP: running instance count when a project access token is configured
+- Kubernetes (when configured): pod/node inventory plus node CPU/memory from metrics-server
+- Host metrics from the API process: CPU, memory, disk, network, load, uptime
+- Remote agent ingest: `agent_cpu_usage` and related host samples from `agent/collect.mjs`
+- Retention: 90 days by default (`METRICS_RETENTION_DAYS`, clamped 7–365)
 
-### **DevOps Tools Integration**
-- **Kubernetes**: Pod monitoring, cluster health, resource utilization
-- **Docker**: Container metrics, performance tracking, health checks
-- **Jenkins**: Build status, pipeline monitoring, job analytics
-- **Git Platforms**: GitHub, GitLab, Bitbucket, Azure DevOps integration
-- **CI/CD Monitoring**: Pipeline health, deployment tracking, failure analysis
+### DevOps tools
+When credentials are configured: Kubernetes, Docker, Jenkins, Git (GitHub/GitLab), Prometheus PromQL, Terraform, Ansible, and database probes.
 
-### **Advanced Database Support**
-- **Multiple Database Types**: SQLite, PostgreSQL, MySQL, MongoDB, Redis
-- **Automatic Fallback**: Seamless fallback to local storage if external DB fails
-- **Connection Management**: Connection pooling, health checks, automatic reconnection
-- **Data Migration**: Easy migration between different database types
+### Alerting
+Threshold rules on collected metrics. Delivery when configured: SMTP, Slack, Discord, Telegram, generic webhook, Twilio SMS.
 
-### **Intelligent Alerting System**
-- **Multi-Channel Notifications**: Email, Slack, Discord, Telegram, Webhooks
-- **Advanced Alert Rules**: Complex conditions, thresholds, and duration-based triggers
-- **Escalation Policies**: Multi-level escalation with configurable delays
-- **Alert Management**: Acknowledgment, resolution, and history tracking
-- **Template System**: Customizable alert templates for different scenarios
+### Auth and tenancy
+- bcrypt password hashes, signed JWT sessions, RBAC
+- Optional IP allowlist, TOTP, GitHub OAuth, OIDC
+- SAML ACS is NameID-only and is **not** XML-DSig verified — use OIDC instead
+- First organization: `POST /api/setup`. Additional organizations: authenticated admin `POST /api/orgs` (User Management create-organization dialog)
+- Settings primary key `(org_id, key)`. Usernames unique per org
+- Invite and password-reset tokens are stored hashed; email is sent when SMTP is configured
 
-### **Advanced Dashboard Management**
-- **Multiple Dashboards**: Create and manage unlimited dashboards
-- **Custom Widgets**: Metric cards, charts, tables, status indicators
-- **Real-time Updates**: Live data refresh with configurable intervals
-- **Dashboard Templates**: Pre-built templates for common monitoring scenarios
-- **Export/Import**: Share dashboards across teams and environments
-- **Responsive Design**: Mobile-friendly interface with adaptive layouts
+### Backups
+Org-scoped JSON snapshots via `/api/backups`. This is not a per-tenant filesystem snapshot of SQLite/Postgres and not a physical Postgres dump.
 
-### **Enterprise Security**
-- **Authentication & Authorization**: Role-based access control
-- **Data Encryption**: AES-256 encryption for sensitive data
-- **Audit Logging**: Comprehensive audit trail for compliance
-- **IP Whitelisting**: Restrict access to specific IP addresses
-- **Session Management**: Configurable session timeouts and security policies
+### CI
+GitHub Actions runs unit/API tests and a PostgreSQL job (`npm run test:postgres`).
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Frontend (React + TypeScript)           │
-├─────────────────────────────────────────────────────────────┤
-│                    Advanced Services Layer                  │
-│  ┌─────────────┬─────────────┬─────────────┬─────────────┐  │
-│  │   Cloud     │   DevOps    │  Advanced   │  Advanced   │  │
-│  │ Monitoring  │Integrations │  Database   │ Alerting    │  │
-│  └─────────────┴─────────────┴─────────────┴─────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                    Data Layer                               │
-│  ┌─────────────┬─────────────┬─────────────┬─────────────┐  │
-│  │  SQLite     │PostgreSQL   │   MySQL     │  MongoDB    │  │
-│  │  Redis      │ IndexedDB   │   Custom    │   External  │  │
-│  └─────────────┴─────────────┴─────────────┴─────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                    External Integrations                    │
-│  ┌─────────────┬─────────────┬─────────────┬─────────────┐  │
-│  │     AWS     │    Azure    │     GCP     │ Kubernetes  │  │
-│  │   Docker    │   Jenkins   │    Git      │  Webhooks   │  │
-│  └─────────────┴─────────────┴─────────────┴─────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│           UI (React + Vite :5173)           │
+└──────────────────────┬──────────────────────┘
+                       │  /api  +  /socket.io
+┌──────────────────────▼──────────────────────┐
+│     API (Express :3000, SQLite or Postgres) │
+│  auth · metrics · alerts · dashboards       │
+│  collectors (host + optional vendor APIs)   │
+└─────────────────────────────────────────────┘
 ```
+
+Socket.IO clients join `org:<id>` after JWT auth (`auth.token`). Events: `metrics-update`, `service-health`.
 
 ## Getting Started
 
 ### Prerequisites
 
-- Node.js 18+ 
-- npm or yarn
-- Modern web browser
-- (Optional) External database (PostgreSQL, MySQL, MongoDB, Redis)
+- Node.js 22+
+- npm
 
 ### Installation
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/your-org/devops-ai-sentinel.git
-   cd devops-ai-sentinel
-   ```
+```bash
+git clone https://github.com/fayazkhan121/DevOps-AI-Sentinel.git
+cd DevOps-AI-Sentinel
+cp env.example .env
+# set JWT_SECRET and ENCRYPTION_KEY
+npm install
+npm run dev
+```
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   # or
-   yarn install
-   ```
+Open http://localhost:5173 and complete first-time setup (password length at least 8 characters).
 
-3. **Start development server**
-   ```bash
-   npm run dev
-   # or
-   yarn dev
-   ```
-
-4. **Open your browser**
-   Navigate to `http://localhost:5173`
+The API is http://localhost:3000 (`GET /api/health`).
 
 ### Quick Configuration
 
-1. **Access Settings**: Go to Settings → Advanced tab
-2. **Configure Database**: Choose your preferred database type
-3. **Add Cloud Providers**: Configure AWS, Azure, or GCP credentials
-4. **Setup DevOps Tools**: Connect Kubernetes, Docker, or Jenkins
-5. **Configure Alerts**: Set up notification channels and alert rules
-
-## Configuration
-
-### Database Configuration
-
-The platform supports multiple database types with automatic fallback:
-
-```typescript
-// Example: PostgreSQL Configuration
-{
-  type: 'postgresql',
-  host: 'localhost',
-  port: 5432,
-  username: 'devops_user',
-  password: 'secure_password',
-  database: 'devops_sentinel',
-  ssl: true
-}
-```
-
-### Cloud Provider Setup
-
-#### AWS Configuration
-```typescript
-{
-  aws: {
-    accessKeyId: 'AKIA...',
-    secretAccessKey: 'your-secret-key',
-    region: 'us-east-1'
-  }
-}
-```
-
-#### Azure Configuration
-```typescript
-{
-  azure: {
-    tenantId: 'your-tenant-id',
-    clientId: 'your-client-id',
-    clientSecret: 'your-client-secret',
-    subscriptionId: 'your-subscription-id'
-  }
-}
-```
-
-#### GCP Configuration
-```typescript
-{
-  gcp: {
-    projectId: 'your-project-id',
-    keyFilename: '/path/to/service-account-key.json'
-  }
-}
-```
-
-### DevOps Tools Integration
-
-#### Kubernetes
-```typescript
-{
-  apiServer: 'https://kubernetes.default.svc',
-  token: 'your-service-account-token',
-  namespace: 'default',
-  context: 'default'
-}
-```
-
-#### Docker
-```typescript
-{
-  host: 'localhost',
-  port: 2375,
-  tls: false
-}
-```
-
-#### Jenkins
-```typescript
-{
-  url: 'http://jenkins.example.com',
-  username: 'jenkins-user',
-  apiToken: 'your-api-token'
-}
-```
-
-## Dashboard Templates
-
-### Infrastructure Monitoring
-- CPU, memory, and disk usage tracking
-- Network performance monitoring
-- Service health status
-- Resource utilization trends
-
-### Cloud Operations
-- Cost analysis and budgeting
-- Resource optimization recommendations
-- Performance metrics across regions
-- Compliance and security monitoring
-
-### DevOps Pipeline
-- CI/CD pipeline health
-- Build and deployment status
-- Code quality metrics
-- Release tracking and rollback
-
-## Alert Configuration
-
-### Alert Rules
-```typescript
-{
-  id: 'high-cpu-usage',
-  name: 'High CPU Usage',
-  condition: {
-    metric: 'cpu_usage',
-    operator: '>',
-    value: 80,
-    duration: '5m',
-    threshold: 3
-  },
-  actions: {
-    email: { recipients: ['admin@company.com'] },
-    slack: { channel: '#alerts' },
-    webhook: { url: 'https://pagerduty.com/webhook' }
-  }
-}
-```
-
-### Notification Channels
-- **Email**: SMTP configuration with templates
-- **Slack**: Webhook integration with rich formatting
-- **Webhook**: Custom HTTP endpoints
-- **SMS**: Twilio integration
-- **Push**: Web push notifications
-
-### Escalation Policies
-```typescript
-{
-  levels: [
-    {
-      level: 1,
-      delay: '5m',
-      channels: ['email'],
-      actions: []
-    },
-    {
-      level: 2,
-      delay: '15m',
-      channels: ['email', 'slack'],
-      actions: []
-    },
-    {
-      level: 3,
-      delay: '1h',
-      channels: ['email', 'slack', 'webhook'],
-      actions: []
-    }
-  ]
-}
-```
-
-## API Integration
-
-### REST API Endpoints
-- `GET /api/metrics` - Retrieve metrics data
-- `POST /api/alerts` - Create or update alerts
-- `GET /api/dashboards` - List available dashboards
-- `POST /api/integrations` - Configure integrations
-
-### WebSocket Events
-- `metrics_update` - Real-time metrics updates
-- `alert_triggered` - Alert notifications
-- `status_change` - Service status changes
+1. Settings → Advanced: save cloud / Kubernetes / Docker / Jenkins credentials
+2. Credentials are encrypted (AES-256-GCM) and stored on the server; collectors run on the API interval
+3. Add a notification channel and a matching alert rule
 
 ## Testing
 
 ```bash
-# Run unit tests
-npm run test
-
-# Run integration tests
-npm run test:integration
-
-# Run e2e tests
-npm run test:e2e
-
-# Generate test coverage
-npm run test:coverage
+npm test
+npm run build
+npm run lint
 ```
+
+PostgreSQL path (matches CI): set `DATABASE_TYPE=postgres` and run `npm run test:postgres`.
 
 ## Deployment
 
-### Docker Deployment
-```bash
-# Build Docker image
-docker build -t devops-ai-sentinel .
+### Docker
 
-# Run container
-docker run -p 3000:3000 devops-ai-sentinel
+Compose requires `JWT_SECRET` and `ENCRYPTION_KEY`. Optional profiles: `postgres`, `tls`.
+
+```bash
+JWT_SECRET=... ENCRYPTION_KEY=... docker compose up --build
+# optional:
+# docker compose --profile postgres up --build
+# docker compose --profile tls up --build
 ```
 
-### Production Build
+The container serves the production UI from `dist/` on port 3000.
+
+### Production (without Docker)
+
 ```bash
-# Build for production
 npm run build
-
-# Preview production build
-npm run preview
+NODE_ENV=production PORT=3000 npm start
 ```
 
-### Environment Variables
+## REST API
+
+- `GET /api/health`
+- `POST /api/setup` `POST /api/auth/login` `POST /api/auth/logout`
+- `POST /api/orgs` (authenticated admin) `GET /api/orgs/current`
+- `GET /api/metrics` `GET /api/metrics/latest` `POST /api/metrics/collect`
+- `GET /api/alerts` `POST /api/alerts/:id/ack` `POST /api/alerts/:id/resolve`
+- `GET|POST /api/dashboards` `GET /api/dashboards/:id/export`
+- `GET|POST /api/integrations`
+- `GET|POST /api/backups` `POST /api/backups/:id/restore`
+- `POST /api/agents/ingest` (header `X-Agent-Key`)
+- `GET /api/reports/compliance?format=csv|json`
+
+## Host agent
+
 ```bash
-# Database Configuration
-DATABASE_TYPE=postgresql
-DATABASE_HOST=localhost
-DATABASE_PORT=5432
-DATABASE_USER=devops_user
-DATABASE_PASSWORD=secure_password
-
-# Cloud Provider Credentials
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-AZURE_TENANT_ID=your-tenant-id
-GCP_PROJECT_ID=your-project-id
-
-# Security
-JWT_SECRET=your-jwt-secret
-ENCRYPTION_KEY=your-encryption-key
+SENTINEL_URL=http://localhost:3000 AGENT_KEY=... node agent/collect.mjs
 ```
 
-## Contributing
+Create a key with `POST /api/agents/keys` as an admin. Ingested samples include `agent_cpu_usage`.
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+## Remaining (not in this product)
 
-### Development Setup
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
+- Native iOS/Android
+- XML-DSig SAML (use OIDC)
+- Vulnerability scanning / cost-optimization engines
+- HA, SCIM
+- Per-tenant physical Postgres dumps
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
-## Support
+## Contributing
 
-- **Documentation**: [docs.devops-ai-sentinel.com](https://docs.devops-ai-sentinel.com)
-- **Issues**: [GitHub Issues](https://github.com/your-org/devops-ai-sentinel/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/devops-ai-sentinel/discussions)
-- **Email**: support@devops-ai-sentinel.com
-
-## Acknowledgments
-
-- Built with [React](https://reactjs.org/) and [TypeScript](https://www.typescriptlang.org/)
-- Styled with [Tailwind CSS](https://tailwindcss.com/)
-- UI components from [shadcn/ui](https://ui.shadcn.com/)
-- Charts powered by [Recharts](https://recharts.org/)
-- Icons from [Lucide React](https://lucide.dev/)
-
-## Roadmap
-
-### v2.0 (Q2 2024)
-- [ ] Machine Learning-powered anomaly detection
-- [ ] Advanced cost optimization recommendations
-- [ ] Multi-tenant architecture
-- [ ] Advanced RBAC and SSO integration
-
-### v2.1 (Q3 2024)
-- [ ] Custom metric collection agents
-- [ ] Advanced reporting and analytics
-- [ ] Mobile application
-- [ ] API rate limiting and quotas
-
-### v2.2 (Q4 2024)
-- [ ] Edge computing monitoring
-- [ ] IoT device integration
-- [ ] Advanced automation workflows
-- [ ] Compliance reporting templates
-
----
-
-**DevOps AI Sentinel** - Empowering DevOps teams with intelligent monitoring and alerting solutions.
-
-
-
-
+See [CONTRIBUTING.md](CONTRIBUTING.md).

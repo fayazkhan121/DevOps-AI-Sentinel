@@ -7,16 +7,15 @@ import { Progress } from '@/components/ui/progress';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { 
-  Activity, Shield, DollarSign, Server, Database, Network, 
+  Activity, DollarSign, Server, Database, Network, 
   TrendingUp, TrendingDown, AlertTriangle, CheckCircle, XCircle,
   Play, Pause, RefreshCw, Settings, BarChart3, PieChart
 } from 'lucide-react';
 import { advancedMonitoring } from '@/services/advancedMonitoring';
-import { advancedSecurity } from '@/services/advancedSecurity';
-import { advancedCostManagement } from '@/services/advancedCostManagement';
 import { advancedDatabase } from '@/services/advancedDatabase';
 import { cloudMonitoring } from '@/services/cloudMonitoring';
 import { devopsIntegrations } from '@/services/devopsIntegrations';
+import { apiFetch } from '@/lib/apiClient';
 
 interface DashboardMetrics {
   monitoring: {
@@ -84,8 +83,6 @@ export const AdvancedDashboard: React.FC = () => {
   });
 
   const [isMonitoring, setIsMonitoring] = useState(false);
-  const [isSecurityMonitoring, setIsSecurityMonitoring] = useState(false);
-  const [isCostMonitoring, setIsCostMonitoring] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [loading, setLoading] = useState(true);
 
@@ -97,12 +94,8 @@ export const AdvancedDashboard: React.FC = () => {
 
         // Start monitoring services
         advancedMonitoring.startMonitoring();
-        advancedSecurity.startSecurityMonitoring();
-        advancedCostManagement.startCostMonitoring();
 
         setIsMonitoring(true);
-        setIsSecurityMonitoring(true);
-        setIsCostMonitoring(true);
 
         // Set up event listeners
         setupEventListeners();
@@ -122,8 +115,6 @@ export const AdvancedDashboard: React.FC = () => {
     // Cleanup on unmount
     return () => {
       advancedMonitoring.stopMonitoring();
-      advancedSecurity.stopSecurityMonitoring();
-      advancedCostManagement.stopCostMonitoring();
     };
   }, []);
 
@@ -133,12 +124,6 @@ export const AdvancedDashboard: React.FC = () => {
     advancedMonitoring.onTargetUpdate('system-memory', () => updateMetrics());
     advancedMonitoring.onTargetUpdate('system-disk', () => updateMetrics());
     advancedMonitoring.onTargetUpdate('system-network', () => updateMetrics());
-
-    // Security events
-    advancedSecurity.onSecurityEvent('security-event', () => updateMetrics());
-
-    // Cost events
-    advancedCostManagement.onCostEvent('budget-alert', () => updateMetrics());
   };
 
   const collectMetrics = async () => {
@@ -150,22 +135,24 @@ export const AdvancedDashboard: React.FC = () => {
       const healthyTargets = targets.filter(t => t.lastStatus === 'healthy').length;
       const unhealthyTargets = targets.filter(t => t.lastStatus === 'unhealthy').length;
 
-      // Collect security metrics
-      const securityStatus = advancedSecurity.getSecurityStatus();
-      const activeScans = advancedSecurity.getActiveScans();
-      const securityEvents = advancedSecurity.getSecurityEvents(100);
-      const criticalEvents = securityEvents.filter(e => e.level === 'fatal' || e.level === 'error');
-
-      // Collect cost metrics
-      const currentCosts = advancedCostManagement.getCurrentPeriodCosts();
-      const costTrends = advancedCostManagement.getCostTrends();
-      const optimizations = advancedCostManagement.getOptimizations();
-      const budgetUtilization = advancedCostManagement.getBudgetUtilization('default-monthly');
-
-      // Collect infrastructure metrics
       const dbStatus = await advancedDatabase.getConnectionStatus();
+      await cloudMonitoring.refreshStatus();
       const cloudStatus = cloudMonitoring.getProviderStatus();
       const devopsStatus = devopsIntegrations.getIntegrationStatus();
+
+      let resourceCounts: Record<string, number> = {};
+      let awsCost = 0;
+      try {
+        const latest = await apiFetch<{ metrics: Array<{ name: string; value: number; source: string }> }>('/metrics/latest');
+        for (const metric of latest.metrics || []) {
+          if (metric.name === 'aws_unblended_cost') awsCost = Number(metric.value || 0);
+          const isInventory = metric.name.includes('count') || metric.name.includes('instance') || metric.name.includes('vm') || metric.name.includes('ec2') || metric.name.includes('container');
+          if (!isInventory) continue;
+          resourceCounts[metric.source] = (resourceCounts[metric.source] || 0) + Number(metric.value || 0);
+        }
+      } catch {
+        resourceCounts = {};
+      }
 
       setMetrics({
         monitoring: {
@@ -177,26 +164,26 @@ export const AdvancedDashboard: React.FC = () => {
           availability: performanceMetrics.availability
         },
         security: {
-          status: securityStatus,
-          activeScans: activeScans.length,
-          recentEvents: securityEvents.length,
-          criticalAlerts: criticalEvents.length,
-          complianceScore: 100 - (criticalEvents.length * 10) // Simple scoring
+          status: 'secure',
+          activeScans: 0,
+          recentEvents: 0,
+          criticalAlerts: 0,
+          complianceScore: 100
         },
         cost: {
-          currentPeriod: currentCosts.total,
-          previousPeriod: costTrends.length > 0 ? costTrends[0].totalCost : 0,
-          change: costTrends.length > 0 ? costTrends[0].change : 0,
-          budgetUtilization: budgetUtilization.percentage,
-          potentialSavings: optimizations.reduce((sum, opt) => sum + opt.potentialSavings, 0),
-          topExpenses: costTrends.length > 0 ? costTrends[0].topServices : []
+          currentPeriod: awsCost,
+          previousPeriod: 0,
+          change: 0,
+          budgetUtilization: 0,
+          potentialSavings: 0,
+          topExpenses: []
         },
         infrastructure: {
           totalResources: Object.values(cloudStatus).filter(Boolean).length,
           cloudProviders: Object.entries(cloudStatus).map(([name, status]) => ({
             name: name.toUpperCase(),
             status: status ? 'connected' : 'disconnected',
-            resources: Math.floor(Math.random() * 50) + 10
+            resources: status ? (resourceCounts[name] || 0) : 0
           })),
           databases: [{
             name: 'Primary Database',
@@ -326,31 +313,20 @@ export const AdvancedDashboard: React.FC = () => {
           </CardContent>
         </Card>
 
+        {metrics.cost.currentPeriod > 0 && (
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Security Status</CardTitle>
-            {getStatusIcon(metrics.security.status)}
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold capitalize">{metrics.security.status}</div>
-            <p className="text-xs text-muted-foreground">
-              {metrics.security.activeScans} active scans, {metrics.security.criticalAlerts} critical alerts
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Monthly Cost</CardTitle>
+            <CardTitle className="text-sm font-medium">AWS Unblended Cost</CardTitle>
             <DollarSign className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{formatCurrency(metrics.cost.currentPeriod)}</div>
             <p className="text-xs text-muted-foreground">
-              {metrics.cost.change > 0 ? '+' : ''}{formatPercentage(metrics.cost.change)} from last month
+              Last 30 days from Cost Explorer
             </p>
           </CardContent>
         </Card>
+        )}
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -371,8 +347,6 @@ export const AdvancedDashboard: React.FC = () => {
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
-          <TabsTrigger value="security">Security</TabsTrigger>
-          <TabsTrigger value="cost">Cost Management</TabsTrigger>
           <TabsTrigger value="infrastructure">Infrastructure</TabsTrigger>
         </TabsList>
 
@@ -422,104 +396,22 @@ export const AdvancedDashboard: React.FC = () => {
                 </div>
               </CardContent>
             </Card>
-
-            {/* Security Overview */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center">
-                  <Shield className="h-5 w-5 mr-2" />
-                  Security Status
-                </CardTitle>
-                <CardDescription>Security monitoring and compliance</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span>Compliance Score</span>
-                    <span>{formatPercentage(metrics.security.complianceScore)}</span>
-                  </div>
-                  <Progress value={metrics.security.complianceScore} className="h-2" />
-                </div>
-
-                <Separator />
-
-                <div className="grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <div className="font-medium">{metrics.security.activeScans}</div>
-                    <div className="text-muted-foreground">Active Scans</div>
-                  </div>
-                  <div>
-                    <div className="font-medium text-red-600">{metrics.security.criticalAlerts}</div>
-                    <div className="text-muted-foreground">Critical Alerts</div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <div className="font-medium">{metrics.security.recentEvents}</div>
-                    <div className="text-muted-foreground">Recent Events</div>
-                  </div>
-                  <div>
-                    <div className="font-medium capitalize">{metrics.security.status}</div>
-                    <div className="text-muted-foreground">Overall Status</div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
           </div>
 
-          {/* Cost Overview */}
+          {metrics.cost.currentPeriod > 0 && (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center">
                 <DollarSign className="h-5 w-5 mr-2" />
-                Cost Management
+                AWS Cost
               </CardTitle>
-              <CardDescription>Budget tracking and optimization opportunities</CardDescription>
+              <CardDescription>Unblended cost from Cost Explorer when AWS credentials are configured</CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="space-y-2">
-                  <div className="text-sm font-medium">Budget Utilization</div>
-                  <div className="text-2xl font-bold">{formatPercentage(metrics.cost.budgetUtilization)}</div>
-                  <Progress value={metrics.cost.budgetUtilization} className="h-2" />
-                </div>
-                
-                <div className="space-y-2">
-                  <div className="text-sm font-medium">Potential Savings</div>
-                  <div className="text-2xl font-bold text-green-600">
-                    {formatCurrency(metrics.cost.potentialSavings)}
-                  </div>
-                  <div className="text-xs text-muted-foreground">From optimization recommendations</div>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="text-sm font-medium">Cost Change</div>
-                  <div className={`text-2xl font-bold ${metrics.cost.change > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                    {metrics.cost.change > 0 ? '+' : ''}{formatPercentage(metrics.cost.change)}
-                  </div>
-                  <div className="text-xs text-muted-foreground">vs. previous period</div>
-                </div>
-              </div>
-
-              {metrics.cost.topExpenses.length > 0 && (
-                <>
-                  <Separator />
-                  <div>
-                    <div className="text-sm font-medium mb-2">Top Expenses</div>
-                    <div className="space-y-2">
-                      {metrics.cost.topExpenses.slice(0, 3).map((expense, index) => (
-                        <div key={index} className="flex justify-between text-sm">
-                          <span>{expense.service}</span>
-                          <span>{formatCurrency(expense.cost)} ({formatPercentage(expense.percentage)})</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              )}
+            <CardContent>
+              <div className="text-2xl font-bold">{formatCurrency(metrics.cost.currentPeriod)}</div>
             </CardContent>
           </Card>
+          )}
         </TabsContent>
 
         {/* Monitoring Tab */}
@@ -558,108 +450,6 @@ export const AdvancedDashboard: React.FC = () => {
                   </div>
                 ))}
               </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Security Tab */}
-        <TabsContent value="security" className="space-y-4">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Active Security Scans</CardTitle>
-                <CardDescription>Current vulnerability and compliance scans</CardDescription>
-              </CardHeader>
-              <CardContent>
-                {advancedSecurity.getActiveScans().length > 0 ? (
-                  <div className="space-y-3">
-                    {advancedSecurity.getActiveScans().map((scan) => (
-                      <div key={scan.id} className="flex items-center justify-between p-3 border rounded-lg">
-                        <div>
-                          <div className="font-medium">{scan.type} Scan</div>
-                          <div className="text-sm text-muted-foreground">
-                            Target: {scan.target} • {scan.findings.length} findings
-                          </div>
-                        </div>
-                        <Badge variant={scan.status === 'completed' ? 'default' : 'secondary'}>
-                          {scan.status}
-                        </Badge>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-center py-8 text-muted-foreground">
-                    No active security scans
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Recent Security Events</CardTitle>
-                <CardDescription>Latest security alerts and incidents</CardDescription>
-              </CardHeader>
-              <CardContent>
-                {advancedSecurity.getSecurityEvents(5).length > 0 ? (
-                  <div className="space-y-3">
-                    {advancedSecurity.getSecurityEvents(5).map((event) => (
-                      <div key={event.id} className="flex items-center space-x-3 p-3 border rounded-lg">
-                        <Badge variant={event.level === 'error' || event.level === 'fatal' ? 'destructive' : 'secondary'}>
-                          {event.level}
-                        </Badge>
-                        <div className="flex-1">
-                          <div className="text-sm font-medium">{event.message}</div>
-                          <div className="text-xs text-muted-foreground">
-                            {new Date(event.timestamp).toLocaleString()}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-center py-8 text-muted-foreground">
-                    No recent security events
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-        </TabsContent>
-
-        {/* Cost Management Tab */}
-        <TabsContent value="cost" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Cost Optimization Recommendations</CardTitle>
-              <CardDescription>Actionable recommendations to reduce costs</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {advancedCostManagement.getOptimizations().length > 0 ? (
-                <div className="space-y-4">
-                  {advancedCostManagement.getOptimizations().slice(0, 5).map((opt) => (
-                    <div key={opt.id} className="p-4 border rounded-lg">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="font-medium">{opt.resourceName}</div>
-                        <Badge variant={opt.priority === 'critical' ? 'destructive' : 'secondary'}>
-                          {opt.priority}
-                        </Badge>
-                      </div>
-                      <div className="text-sm text-muted-foreground mb-2">
-                        {opt.type} • {opt.implementation}
-                      </div>
-                      <div className="flex items-center justify-between text-sm">
-                        <span>Potential Savings: <span className="font-medium text-green-600">{formatCurrency(opt.potentialSavings)}</span></span>
-                        <span>Effort: {opt.effort} • Risk: {opt.risk}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-8 text-muted-foreground">
-                  No optimization recommendations available
-                </div>
-              )}
             </CardContent>
           </Card>
         </TabsContent>
@@ -723,9 +513,7 @@ export const AdvancedDashboard: React.FC = () => {
       {/* Footer */}
       <div className="text-center text-sm text-muted-foreground">
         Last updated: {lastUpdate.toLocaleString()} • 
-        Monitoring: {isMonitoring ? 'Active' : 'Inactive'} • 
-        Security: {isSecurityMonitoring ? 'Active' : 'Inactive'} • 
-        Cost: {isCostMonitoring ? 'Active' : 'Inactive'}
+        Monitoring: {isMonitoring ? 'Active' : 'Inactive'}
       </div>
     </div>
   );

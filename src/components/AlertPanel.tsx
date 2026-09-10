@@ -5,6 +5,7 @@ import { Button } from "./ui/button";
 import { useToast } from "./ui/use-toast";
 import { useEffect } from "react";
 import WebSocketService from "@/services/websocket";
+import { apiFetch } from "@/lib/apiClient";
 
 interface Alert {
   id: number;
@@ -20,41 +21,28 @@ interface Alert {
 
 export function AlertPanel() {
   const { toast } = useToast();
-  const [alerts, setAlerts] = useState<Alert[]>([
-    {
-      id: 1,
-      severity: "high",
-      title: "High CPU usage detected in production cluster",
-      source: "Kubernetes Monitoring",
-      timestamp: "15/01/2025, 11:06:57",
-      prediction: "AI Prediction: 85.0% chance of recurrence around 16/01/2025, 11:06:57",
-      action: "Scale up the deployment or optimize resource usage",
-      resolution: "Implement automatic horizontal pod scaling",
-      impact: "Affects user response times and system stability"
-    },
-    {
-      id: 2,
-      severity: "medium",
-      title: "Memory usage approaching threshold",
-      source: "Resource Monitor",
-      timestamp: "15/01/2025, 11:06:57",
-      prediction: "AI Prediction: Memory usage will reach critical levels in 2 hours",
-      action: "Investigate memory leaks and optimize cache usage",
-      impact: "May affect application performance"
-    },
-    {
-      id: 3,
-      severity: "low",
-      title: "Network latency spike detected",
-      source: "Network Monitor",
-      timestamp: "15/01/2025, 11:06:57",
-      prediction: "AI Prediction: Temporary spike, expected to normalize in 30 minutes",
-      action: "Monitor network traffic patterns",
-      impact: "Minor impact on API response times"
-    }
-  ]);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
 
   useEffect(() => {
+    const load = async () => {
+      try {
+        const data = await apiFetch<{ alerts: Array<{ id: string; name: string; description: string; severity: string; source: string; timestamp: string; metadata?: string }> }>('/alerts');
+        setAlerts((data.alerts || []).map((row) => ({
+          id: row.id as unknown as number,
+          severity: row.severity === 'critical' ? 'high' : row.severity === 'warning' ? 'medium' : 'low',
+          title: row.name || row.description,
+          source: row.source,
+          timestamp: row.timestamp,
+          action: undefined,
+          resolution: row.description,
+          impact: undefined,
+        })));
+      } catch (error) {
+        console.error('Failed to load alerts', error);
+      }
+    };
+    void load();
+
     const ws = WebSocketService.getInstance();
     
     ws.subscribeToAlerts((newAlert: Alert) => {

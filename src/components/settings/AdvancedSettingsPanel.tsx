@@ -31,9 +31,10 @@ import { advancedDatabase } from '@/services/advancedDatabase';
 import { cloudMonitoring } from '@/services/cloudMonitoring';
 import { devopsIntegrations } from '@/services/devopsIntegrations';
 import { advancedAlerting } from '@/services/advancedAlerting';
+import { apiFetch } from '@/lib/apiClient';
 
 interface DatabaseConfig {
-  type: 'sqlite' | 'postgresql' | 'mysql' | 'mongodb' | 'redis' | 'indexeddb';
+  type: 'sqlite' | 'postgresql' | 'mysql' | 'mongodb' | 'redis';
   host?: string;
   port?: number;
   username?: string;
@@ -64,7 +65,7 @@ interface CloudCredentials {
 export const AdvancedSettingsPanel: React.FC = () => {
   const [activeTab, setActiveTab] = useState('database');
   const [databaseConfig, setDatabaseConfig] = useState<DatabaseConfig>({
-    type: 'indexeddb'
+    type: 'sqlite'
   });
   const [cloudCredentials, setCloudCredentials] = useState<CloudCredentials>({});
   const [devopsConfig, setDevopsConfig] = useState({
@@ -77,6 +78,13 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const [connectionStatus, setConnectionStatus] = useState<{[key: string]: boolean}>({});
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [totpEnabled, setTotpEnabled] = useState(false);
+  const [totpSecret, setTotpSecret] = useState('');
+  const [totpUrl, setTotpUrl] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+  const [totpPassword, setTotpPassword] = useState('');
+  const [ipAllowlist, setIpAllowlist] = useState<Array<{ id: string; cidr: string }>>([]);
+  const [newCidr, setNewCidr] = useState('');
 
   useEffect(() => {
     loadCurrentConfig();
@@ -85,40 +93,79 @@ export const AdvancedSettingsPanel: React.FC = () => {
 
   const loadCurrentConfig = async () => {
     try {
-      // Load database configuration
-      const dbConfig = await advancedDatabase.getConnectionStatus();
-      if (dbConfig) {
-        setDatabaseConfig({ type: dbConfig.type as any });
-      }
+      const dbStatus = await advancedDatabase.testConnection({ type: databaseConfig.type, ...databaseConfig });
+      setConnectionStatus(prev => ({ ...prev, database: dbStatus }));
 
-      // Load cloud provider status
+      await cloudMonitoring.refreshStatus();
       const cloudStatus = cloudMonitoring.getProviderStatus();
-      setConnectionStatus(cloudStatus);
+      setConnectionStatus(prev => ({ ...prev, ...cloudStatus }));
 
-      // Load DevOps integration status
       const devopsStatus = devopsIntegrations.getIntegrationStatus();
       setConnectionStatus(prev => ({ ...prev, ...devopsStatus }));
 
-      // Load notification channels
-      const channels = advancedAlerting.getChannels();
-      setNotificationChannels(channels);
+      await advancedAlerting.refresh();
+      setNotificationChannels((advancedAlerting.getChannels() || []).map((ch) => ({
+        ...ch,
+        enabled: ch.enabled ?? ch.isEnabled ?? true,
+        config: ch.config || {},
+      })));
+      const me = await apiFetch<{ user?: { totpEnabled?: boolean } }>('/auth/me').catch(() => ({ user: undefined }));
+      setTotpEnabled(Boolean(me.user?.totpEnabled));
+      const settingsData = await apiFetch<{ ipAllowlist?: Array<{ id: string; cidr: string }> }>('/settings').catch(() => ({ ipAllowlist: [] }));
+      setIpAllowlist(settingsData.ipAllowlist || []);
     } catch (error) {
       console.error('Failed to load configuration:', error);
     }
   };
 
+  const persistNotificationChannels = async (channels = notificationChannels) => {
+    const existing = await apiFetch<{ channels: Array<{ id: string }> }>('/channels').catch(() => ({ channels: [] as Array<{ id: string }> }));
+    const existingIds = new Set((existing.channels || []).map((c) => c.id));
+    for (const channel of channels) {
+      const payload = {
+        type: channel.type,
+        name: channel.name,
+        config: channel.config || {},
+        isEnabled: channel.enabled !== false,
+      };
+      if (channel.id && existingIds.has(channel.id)) {
+        await apiFetch(`/channels/${channel.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+      } else {
+        await apiFetch('/channels', { method: 'POST', body: JSON.stringify(payload) });
+      }
+    }
+    await advancedAlerting.refresh();
+    setNotificationChannels((advancedAlerting.getChannels() || []).map((ch) => ({
+      ...ch,
+      enabled: ch.enabled ?? ch.isEnabled ?? true,
+      config: ch.config || {},
+    })));
+  };
+
+  const updateChannelConfig = (index: number, field: string, value: string) => {
+    setNotificationChannels((prev) => {
+      const next = [...prev];
+      next[index] = {
+        ...next[index],
+        config: { ...(next[index].config || {}), [field]: value },
+      };
+      return next;
+    });
+  };
+
   const testConnections = async () => {
     setIsLoading(true);
     try {
-      // Test database connection
-      const dbStatus = await advancedDatabase.testConnection();
+      const dbStatus = await advancedDatabase.testConnection({ type: databaseConfig.type, ...databaseConfig });
       setConnectionStatus(prev => ({ ...prev, database: dbStatus }));
 
-      // Test cloud connections
+      await persistNotificationChannels().catch(() => undefined);
+      await apiFetch('/metrics/collect', { method: 'POST' }).catch(() => undefined);
+
+      await cloudMonitoring.refreshStatus();
       const cloudStatus = cloudMonitoring.getProviderStatus();
       setConnectionStatus(prev => ({ ...prev, ...cloudStatus }));
 
-      // Test DevOps connections
       const devopsStatus = devopsIntegrations.getIntegrationStatus();
       setConnectionStatus(prev => ({ ...prev, ...devopsStatus }));
     } catch (error) {
@@ -155,12 +202,20 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const saveDatabaseConfig = async () => {
     try {
       setIsLoading(true);
-      // Update database configuration
-      await advancedDatabase.closeConnection();
-      // Reinitialize with new config
-      setMessage({ type: 'success', text: 'Database configuration saved successfully' });
+      const type = databaseConfig.type;
+      await apiFetch('/integrations', {
+        method: 'POST',
+        body: JSON.stringify({
+          type,
+          name: `${type} database`,
+          config: { ...databaseConfig, type },
+        }),
+      });
+      const ok = await advancedDatabase.testConnection({ type, ...databaseConfig });
+      setConnectionStatus(prev => ({ ...prev, database: ok }));
+      setMessage({ type: ok ? 'success' : 'error', text: ok ? 'Database configuration saved successfully' : 'Saved, but the connection test failed' });
     } catch (error) {
-      setMessage({ type: 'error', text: 'Failed to save database configuration' });
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to save database configuration' });
     } finally {
       setIsLoading(false);
     }
@@ -169,11 +224,11 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const saveCloudCredentials = async () => {
     try {
       setIsLoading(true);
-      cloudMonitoring.updateCredentials(cloudCredentials);
+      await cloudMonitoring.updateCredentials(cloudCredentials);
       setMessage({ type: 'success', text: 'Cloud credentials saved successfully' });
       await testConnections();
     } catch (error) {
-      setMessage({ type: 'error', text: 'Failed to save cloud credentials' });
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to save cloud credentials' });
     } finally {
       setIsLoading(false);
     }
@@ -182,7 +237,6 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const saveDevopsConfig = async () => {
     try {
       setIsLoading(true);
-      // Save DevOps configurations
       if (devopsConfig.kubernetes.enabled) {
         await devopsIntegrations.configureKubernetes(devopsConfig.kubernetes.config as any);
       }
@@ -192,10 +246,13 @@ export const AdvancedSettingsPanel: React.FC = () => {
       if (devopsConfig.jenkins.enabled) {
         await devopsIntegrations.configureJenkins(devopsConfig.jenkins.config as any);
       }
+      if (devopsConfig.git.enabled) {
+        await devopsIntegrations.configureGit(devopsConfig.git.config as any);
+      }
       setMessage({ type: 'success', text: 'DevOps configuration saved successfully' });
       await testConnections();
     } catch (error) {
-      setMessage({ type: 'error', text: 'Failed to save DevOps configuration' });
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to save DevOps configuration' });
     } finally {
       setIsLoading(false);
     }
@@ -215,6 +272,9 @@ export const AdvancedSettingsPanel: React.FC = () => {
 
   const removeNotificationChannel = (channelId: string) => {
     setNotificationChannels(prev => prev.filter(ch => ch.id !== channelId));
+    if (channelId && !channelId.startsWith('channel-')) {
+      void advancedAlerting.removeNotificationChannel(channelId);
+    }
   };
 
   const getConnectionStatusIcon = (status: boolean) => {
@@ -305,7 +365,6 @@ export const AdvancedSettingsPanel: React.FC = () => {
                       <SelectValue placeholder="Select database type" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="indexeddb">IndexedDB (Local)</SelectItem>
                       <SelectItem value="sqlite">SQLite</SelectItem>
                       <SelectItem value="postgresql">PostgreSQL</SelectItem>
                       <SelectItem value="mysql">MySQL</SelectItem>
@@ -323,8 +382,7 @@ export const AdvancedSettingsPanel: React.FC = () => {
                 </div>
               </div>
 
-              {databaseConfig.type !== 'indexeddb' && (
-                <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="db-host">Host</Label>
                     <Input
@@ -384,7 +442,6 @@ export const AdvancedSettingsPanel: React.FC = () => {
                     </div>
                   </div>
                 </div>
-              )}
 
               <div className="flex justify-end">
                 <Button onClick={saveDatabaseConfig} disabled={isLoading}>
@@ -781,19 +838,37 @@ export const AdvancedSettingsPanel: React.FC = () => {
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                           <Label>SMTP Host</Label>
-                          <Input placeholder="smtp.gmail.com" />
+                          <Input
+                            placeholder="smtp.gmail.com"
+                            value={channel.config?.host || ''}
+                            onChange={(e) => updateChannelConfig(index, 'host', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>SMTP Port</Label>
-                          <Input placeholder="587" type="number" />
+                          <Input
+                            placeholder="587"
+                            type="number"
+                            value={channel.config?.port || ''}
+                            onChange={(e) => updateChannelConfig(index, 'port', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>Username</Label>
-                          <Input placeholder="username@gmail.com" />
+                          <Input
+                            placeholder="username@gmail.com"
+                            value={channel.config?.username || ''}
+                            onChange={(e) => updateChannelConfig(index, 'username', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>Password</Label>
-                          <Input placeholder="Password" type="password" />
+                          <Input
+                            placeholder="Password"
+                            type="password"
+                            value={channel.config?.password || ''}
+                            onChange={(e) => updateChannelConfig(index, 'password', e.target.value)}
+                          />
                         </div>
                       </div>
                     )}
@@ -802,11 +877,19 @@ export const AdvancedSettingsPanel: React.FC = () => {
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                           <Label>Webhook URL</Label>
-                          <Input placeholder="https://hooks.slack.com/..." />
+                          <Input
+                            placeholder="https://hooks.slack.com/..."
+                            value={channel.config?.url || ''}
+                            onChange={(e) => updateChannelConfig(index, 'url', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>Channel</Label>
-                          <Input placeholder="#alerts" />
+                          <Input
+                            placeholder="#alerts"
+                            value={channel.config?.channel || ''}
+                            onChange={(e) => updateChannelConfig(index, 'channel', e.target.value)}
+                          />
                         </div>
                       </div>
                     )}
@@ -815,11 +898,18 @@ export const AdvancedSettingsPanel: React.FC = () => {
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                           <Label>Webhook URL</Label>
-                          <Input placeholder="https://api.example.com/webhook" />
+                          <Input
+                            placeholder="https://api.example.com/webhook"
+                            value={channel.config?.url || ''}
+                            onChange={(e) => updateChannelConfig(index, 'url', e.target.value)}
+                          />
                         </div>
                         <div className="space-y-2">
                           <Label>Method</Label>
-                          <Select>
+                          <Select
+                            value={channel.config?.method || 'POST'}
+                            onValueChange={(value) => updateChannelConfig(index, 'method', value)}
+                          >
                             <SelectTrigger>
                               <SelectValue />
                             </SelectTrigger>
@@ -855,78 +945,127 @@ export const AdvancedSettingsPanel: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-lg font-semibold">Two-Factor Authentication</h3>
-                    <p className="text-sm text-muted-foreground">Enable 2FA for enhanced security</p>
+                    <p className="text-sm text-muted-foreground">TOTP authenticator app required at login</p>
                   </div>
-                  <Switch />
+                  <Switch
+                    checked={totpEnabled}
+                    onCheckedChange={async (on) => {
+                      try {
+                        if (on) {
+                          const data = await apiFetch<{ secret: string; otpauthUrl: string }>('/auth/totp/setup', { method: 'POST' });
+                          setTotpSecret(data.secret);
+                          setTotpUrl(data.otpauthUrl);
+                          setMessage({ type: 'info', text: 'Scan the otpauth URL, then confirm with a 6-digit code' });
+                        } else {
+                          await apiFetch('/auth/totp/disable', { method: 'POST', body: JSON.stringify({ password: totpPassword }) });
+                          setTotpEnabled(false);
+                          setTotpSecret('');
+                          setTotpUrl('');
+                          setMessage({ type: 'success', text: 'TOTP disabled' });
+                        }
+                      } catch (error) {
+                        setMessage({ type: 'error', text: error instanceof Error ? error.message : 'TOTP update failed' });
+                      }
+                    }}
+                  />
                 </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold">Session Timeout</h3>
-                    <p className="text-sm text-muted-foreground">Automatically log out inactive users</p>
+                {!totpEnabled && totpSecret && (
+                  <div className="space-y-2">
+                    <Label>Secret</Label>
+                    <Input value={totpSecret} readOnly />
+                    <Label>otpauth URL</Label>
+                    <Input value={totpUrl} readOnly />
+                    <Label>Confirmation code</Label>
+                    <Input
+                      value={totpCode}
+                      onChange={(e) => setTotpCode(e.target.value)}
+                      placeholder="6-digit code"
+                    />
+                    <Button
+                      onClick={async () => {
+                        try {
+                          await apiFetch('/auth/totp/enable', { method: 'POST', body: JSON.stringify({ code: totpCode }) });
+                          setTotpEnabled(true);
+                          setTotpSecret('');
+                          setTotpCode('');
+                          setMessage({ type: 'success', text: 'TOTP enabled' });
+                        } catch (error) {
+                          setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Invalid TOTP code' });
+                        }
+                      }}
+                    >
+                      Confirm 2FA
+                    </Button>
                   </div>
-                  <Select defaultValue="8h">
-                    <SelectTrigger className="w-32">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="1h">1 hour</SelectItem>
-                      <SelectItem value="4h">4 hours</SelectItem>
-                      <SelectItem value="8h">8 hours</SelectItem>
-                      <SelectItem value="24h">24 hours</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold">Audit Logging</h3>
-                    <p className="text-sm text-muted-foreground">Log all user actions for compliance</p>
+                )}
+                {totpEnabled && (
+                  <div className="space-y-2">
+                    <Label>Current password (required to disable 2FA)</Label>
+                    <Input
+                      type="password"
+                      value={totpPassword}
+                      onChange={(e) => setTotpPassword(e.target.value)}
+                    />
                   </div>
-                  <Switch defaultChecked />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold">IP Whitelist</h3>
-                    <p className="text-sm text-muted-foreground">Restrict access to specific IP addresses</p>
-                  </div>
-                  <Switch />
-                </div>
+                )}
               </div>
 
               <Separator />
 
               <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Data Encryption</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label>Encryption Algorithm</Label>
-                    <Select defaultValue="aes-256">
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="aes-128">AES-128</SelectItem>
-                        <SelectItem value="aes-256">AES-256</SelectItem>
-                        <SelectItem value="chacha20">ChaCha20</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Key Rotation</Label>
-                    <Select defaultValue="90d">
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="30d">30 days</SelectItem>
-                        <SelectItem value="90d">90 days</SelectItem>
-                        <SelectItem value="180d">180 days</SelectItem>
-                        <SelectItem value="365d">1 year</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
+                <div>
+                  <h3 className="text-lg font-semibold">IP Allowlist</h3>
+                  <p className="text-sm text-muted-foreground">CIDR ranges allowed to access this organization</p>
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={newCidr}
+                    onChange={(e) => setNewCidr(e.target.value)}
+                    placeholder="192.168.0.0/16"
+                  />
+                  <Button
+                    onClick={async () => {
+                      const cidr = newCidr.trim();
+                      if (!cidr) {
+                        setMessage({ type: 'error', text: 'cidr is required' });
+                        return;
+                      }
+                      try {
+                        await apiFetch('/settings/ip-allowlist', {
+                          method: 'POST',
+                          body: JSON.stringify({ cidr }),
+                        });
+                        setNewCidr('');
+                        const settingsData = await apiFetch<{ ipAllowlist?: Array<{ id: string; cidr: string }> }>('/settings');
+                        setIpAllowlist(settingsData.ipAllowlist || []);
+                      } catch (error) {
+                        setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to add CIDR' });
+                      }
+                    }}
+                  >
+                    Add
+                  </Button>
+                </div>
+                <div className="space-y-2">
+                  {ipAllowlist.map((entry) => (
+                    <div key={entry.id} className="flex items-center justify-between">
+                      <span className="text-sm">{entry.cidr}</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={async () => {
+                          try {
+                            await apiFetch(`/settings/ip-allowlist/${entry.id}`, { method: 'DELETE' });
+                            setIpAllowlist((prev) => prev.filter((item) => item.id !== entry.id));
+                          } catch (error) {
+                            setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to remove CIDR' });
+                          }
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
                 </div>
               </div>
             </CardContent>

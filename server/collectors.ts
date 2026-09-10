@@ -1,0 +1,893 @@
+import os from 'node:os';
+import fs from 'node:fs';
+import { config } from './config.ts';
+import { decryptJson } from './crypto.ts';
+import { getDb, nowIso } from './db.ts';
+import { orgWantsHostMetrics } from './tenancy.ts';
+
+export interface CollectedMetric {
+  name: string;
+  value: number;
+  unit: string;
+  source: string;
+  category: string;
+  tags: Record<string, string>;
+  timestamp: string;
+}
+
+interface IntegrationRow {
+  id: string;
+  type: string;
+  name: string;
+  status: string;
+  config_encrypted: string | null;
+  org_id: string;
+}
+
+function pickStr(cfg: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = cfg[key];
+    if (value != null && String(value).trim() !== '') return String(value);
+  }
+  return '';
+}
+
+/** Parses metrics.k8s.io CPU quantities (n/ns, u, m, or cores) into cores. */
+export function parseK8sCpuCores(quantity: string): number {
+  const raw = String(quantity || '').trim();
+  const match = raw.match(/^([0-9]*\.?[0-9]+)(ns|n|u|m)?$/);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return 0;
+  const suffix = match[2] || '';
+  const multipliers: Record<string, number> = { ns: 1e-9, n: 1e-9, u: 1e-6, m: 1e-3 };
+  return value * (multipliers[suffix] ?? 1);
+}
+
+/** Parses metrics.k8s.io memory quantities (Ki/Mi/Gi/Ti or bytes) into bytes. */
+export function parseK8sMemoryBytes(quantity: string): number {
+  const raw = String(quantity || '').trim();
+  const match = raw.match(/^([0-9]*\.?[0-9]+)(Ki|Mi|Gi|Ti)?$/);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return 0;
+  const suffix = match[2] || '';
+  const multipliers: Record<string, number> = {
+    Ki: 1024,
+    Mi: 1024 ** 2,
+    Gi: 1024 ** 3,
+    Ti: 1024 ** 4,
+  };
+  return value * (multipliers[suffix] ?? 1);
+}
+
+/** Maps UI/form field names onto the keys collectors expect. */
+export function normalizeIntegrationConfig(type: string, raw: Record<string, unknown> | null | undefined): Record<string, string> {
+  const src = (raw || {}) as Record<string, unknown>;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(src)) {
+    if (value == null || value === '') continue;
+    out[key] = typeof value === 'string' ? value : String(value);
+  }
+  const alias = (target: string, ...keys: string[]) => {
+    const value = pickStr(src, ...keys);
+    if (value) out[target] = value;
+  };
+  alias('accessKeyId', 'accessKeyId', 'aws_access_key_id', 'access_key_id');
+  alias('secretAccessKey', 'secretAccessKey', 'aws_secret_access_key', 'secret_access_key');
+  alias('region', 'region', 'aws_region');
+  alias('tenantId', 'tenantId', 'tenant_id');
+  alias('clientId', 'clientId', 'client_id');
+  alias('clientSecret', 'clientSecret', 'client_secret');
+  alias('subscriptionId', 'subscriptionId', 'subscription_id');
+  alias('projectId', 'projectId', 'project_id');
+  alias('apiToken', 'apiToken', 'api_token', 'token');
+  alias('token', 'token', 'apiToken', 'access_token', 'pat', 'secret');
+  alias('host', 'host', 'registry');
+  alias('apiServer', 'apiServer', 'api_server');
+  alias('organization', 'organization', 'organizationName', 'org');
+  alias('username', 'username', 'user');
+  alias('password', 'password', 'appPassword');
+  const kube = pickStr(src, 'kube_config', 'kubeconfig');
+  if (kube && !out.apiServer) {
+    if (kube.startsWith('http')) {
+      out.apiServer = kube;
+    } else {
+      const server = kube.match(/server:\s*(\S+)/)?.[1];
+      const kubeToken = kube.match(/token:\s*(\S+)/)?.[1];
+      if (server) out.apiServer = server;
+      if (kubeToken && !out.token) out.token = kubeToken;
+    }
+  }
+  if (type === 'jenkins' && !out.apiToken && out.token) out.apiToken = out.token;
+  return out;
+}
+
+function cpuPercent(): number {
+  const cpus = os.cpus();
+  if (cpus.length === 0) return 0;
+  let idle = 0;
+  let total = 0;
+  for (const cpu of cpus) {
+    const t = cpu.times;
+    idle += t.idle;
+    total += t.user + t.nice + t.sys + t.idle + t.irq;
+  }
+  if (total === 0) return 0;
+  return Number((((total - idle) / total) * 100).toFixed(2));
+}
+
+function memoryPercent(): number {
+  const total = os.totalmem();
+  if (total === 0) return 0;
+  return Number((((total - os.freemem()) / total) * 100).toFixed(2));
+}
+
+function diskPercent(mount = '/'): { usedPercent: number; availableGb: number } {
+  try {
+    const stats = fs.statfsSync(mount);
+    const total = Number(stats.blocks) * Number(stats.bsize);
+    const free = Number(stats.bavail) * Number(stats.bsize);
+    if (total === 0) return { usedPercent: 0, availableGb: 0 };
+    return {
+      usedPercent: Number((((total - free) / total) * 100).toFixed(2)),
+      availableGb: Number((free / 1024 / 1024 / 1024).toFixed(2)),
+    };
+  } catch {
+    return { usedPercent: 0, availableGb: 0 };
+  }
+}
+
+function networkKbps(): { in: number; out: number } {
+  try {
+    const raw = fs.readFileSync('/proc/net/dev', 'utf8');
+    let rx = 0;
+    let tx = 0;
+    for (const line of raw.split('\n').slice(2)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 10) continue;
+      const iface = parts[0].replace(':', '');
+      if (iface === 'lo') continue;
+      rx += Number(parts[1]) || 0;
+      tx += Number(parts[9]) || 0;
+    }
+    return { in: Number((rx / 1024).toFixed(2)), out: Number((tx / 1024).toFixed(2)) };
+  } catch {
+    return { in: 0, out: 0 };
+  }
+}
+
+export function collectHostMetrics(): CollectedMetric[] {
+  const ts = nowIso();
+  const disk = diskPercent();
+  const net = networkKbps();
+  const load = os.loadavg()[0] || 0;
+  return [
+    { name: 'cpu_usage', value: cpuPercent(), unit: '%', source: 'host', category: 'performance', tags: { host: os.hostname() }, timestamp: ts },
+    { name: 'memory_usage', value: memoryPercent(), unit: '%', source: 'host', category: 'performance', tags: { host: os.hostname() }, timestamp: ts },
+    { name: 'disk_usage', value: disk.usedPercent, unit: '%', source: 'host', category: 'performance', tags: { host: os.hostname() }, timestamp: ts },
+    { name: 'disk_available_gb', value: disk.availableGb, unit: 'GB', source: 'host', category: 'performance', tags: { host: os.hostname() }, timestamp: ts },
+    { name: 'network_in_kb', value: net.in, unit: 'KB', source: 'host', category: 'performance', tags: { host: os.hostname() }, timestamp: ts },
+    { name: 'network_out_kb', value: net.out, unit: 'KB', source: 'host', category: 'performance', tags: { host: os.hostname() }, timestamp: ts },
+    { name: 'load_average', value: Number(load.toFixed(2)), unit: 'load', source: 'host', category: 'performance', tags: { host: os.hostname() }, timestamp: ts },
+    { name: 'uptime_seconds', value: Math.floor(os.uptime()), unit: 's', source: 'host', category: 'availability', tags: { host: os.hostname() }, timestamp: ts },
+  ];
+}
+
+async function listIntegrations(orgId?: string): Promise<IntegrationRow[]> {
+  const db = getDb();
+  if (orgId) {
+    return db.all<IntegrationRow>('SELECT * FROM integrations WHERE org_id = ?', [orgId]);
+  }
+  return db.all<IntegrationRow>('SELECT * FROM integrations');
+}
+
+async function fetchJson(url: string, init: RequestInit = {}, timeoutMs = 8000): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    const text = await res.text();
+    let data: unknown = text;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+    return { ok: res.ok, status: res.status, data };
+  } catch (error) {
+    return { ok: false, status: 0, data: { error: error instanceof Error ? error.message : 'request failed' } };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function collectAws(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const accessKeyId = cfg.accessKeyId || cfg.aws_access_key_id || process.env.AWS_ACCESS_KEY_ID || '';
+  const secretAccessKey = cfg.secretAccessKey || cfg.aws_secret_access_key || process.env.AWS_SECRET_ACCESS_KEY || '';
+  const region = cfg.region || cfg.aws_region || process.env.AWS_DEFAULT_REGION || 'us-east-1';
+  if (!accessKeyId || !secretAccessKey) return [];
+  try {
+    const { EC2Client, DescribeInstancesCommand } = await import('@aws-sdk/client-ec2');
+    const { CloudWatchClient, GetMetricStatisticsCommand } = await import('@aws-sdk/client-cloudwatch');
+    const creds = { accessKeyId, secretAccessKey };
+    const ec2 = new EC2Client({ region, credentials: creds });
+    const cw = new CloudWatchClient({ region, credentials: creds });
+    const described = await ec2.send(new DescribeInstancesCommand({}));
+    const instances = (described.Reservations || []).flatMap((r) => r.Instances || []);
+    const running = instances.filter((i) => i.State?.Name === 'running').length;
+    const metrics: CollectedMetric[] = [
+      {
+        name: 'aws_ec2_instances',
+        value: instances.length,
+        unit: 'count',
+        source: 'aws',
+        category: 'inventory',
+        tags: { region },
+        timestamp: nowIso(),
+      },
+      {
+        name: 'aws_ec2_running',
+        value: running,
+        unit: 'count',
+        source: 'aws',
+        category: 'availability',
+        tags: { region },
+        timestamp: nowIso(),
+      },
+    ];
+    if (instances[0]?.InstanceId) {
+      const end = new Date();
+      const start = new Date(end.getTime() - 5 * 60 * 1000);
+      const cpu = await cw.send(new GetMetricStatisticsCommand({
+        Namespace: 'AWS/EC2',
+        MetricName: 'CPUUtilization',
+        Dimensions: [{ Name: 'InstanceId', Value: instances[0].InstanceId }],
+        StartTime: start,
+        EndTime: end,
+        Period: 300,
+        Statistics: ['Average'],
+      }));
+      const datapoint = cpu.Datapoints?.sort((a, b) => (b.Timestamp?.getTime() || 0) - (a.Timestamp?.getTime() || 0))[0];
+      if (datapoint?.Average !== undefined) {
+        metrics.push({
+          name: 'aws_cpu_usage',
+          value: Number(datapoint.Average.toFixed(2)),
+          unit: '%',
+          source: 'aws',
+          category: 'performance',
+          tags: { region, instance: instances[0].InstanceId },
+          timestamp: nowIso(),
+        });
+      }
+    }
+    metrics.push(...await collectAwsCost(cfg, creds, region));
+    metrics.push(...await collectAwsExtra(cw, region));
+    return metrics;
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : 'AWS collection failed');
+  }
+}
+
+async function collectAzure(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const tenantId = cfg.tenantId || process.env.AZURE_TENANT_ID || '';
+  const clientId = cfg.clientId || process.env.AZURE_CLIENT_ID || '';
+  const clientSecret = cfg.clientSecret || process.env.AZURE_CLIENT_SECRET || '';
+  const subscriptionId = cfg.subscriptionId || process.env.AZURE_SUBSCRIPTION_ID || '';
+  if (!tenantId || !clientId || !clientSecret || !subscriptionId) return [];
+  const tokenRes = await fetchJson(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'client_credentials',
+      scope: 'https://management.azure.com/.default',
+    }),
+  });
+  const token = (tokenRes.data as { access_token?: string })?.access_token;
+  if (!tokenRes.ok || !token) throw new Error('Azure token request failed');
+  const vms = await fetchJson(
+    `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Compute/virtualMachines?api-version=2023-03-01`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const value = (vms.data as { value?: Array<{ id?: string }> })?.value || [];
+  const metrics: CollectedMetric[] = [
+    {
+      name: 'azure_vm_count',
+      value: value.length,
+      unit: 'count',
+      source: 'azure',
+      category: 'inventory',
+      tags: { subscriptionId },
+      timestamp: nowIso(),
+    },
+  ];
+  try {
+    const toCheck = value.filter((vm) => vm.id).slice(0, 20);
+    const views = await Promise.all(
+      toCheck.map((vm) =>
+        fetchJson(`https://management.azure.com${vm.id}/instanceView?api-version=2023-03-01`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      )
+    );
+    const running = views.filter((view) => {
+      if (!view.ok) return false;
+      const statuses = (view.data as { statuses?: Array<{ code?: string }> })?.statuses || [];
+      return statuses.some((status) => (status.code || '').includes('PowerState/running'));
+    }).length;
+    if (toCheck.length === 0 || views.some((view) => view.ok)) {
+      metrics.push({
+        name: 'azure_vm_running',
+        value: running,
+        unit: 'count',
+        source: 'azure',
+        category: 'availability',
+        tags: { subscriptionId },
+        timestamp: nowIso(),
+      });
+    }
+  } catch {
+    // Skip azure_vm_running when instance views cannot be fetched.
+  }
+  return metrics;
+}
+
+async function collectGcp(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const projectId = cfg.projectId || process.env.GCP_PROJECT_ID || '';
+  const accessToken = cfg.accessToken || process.env.GCP_ACCESS_TOKEN || '';
+  if (!projectId || !accessToken) return [];
+  const res = await fetchJson(
+    `https://compute.googleapis.com/compute/v1/projects/${projectId}/aggregated/instances`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) throw new Error('GCP compute query failed');
+  const items = (res.data as { items?: Record<string, { instances?: Array<{ status?: string }> }> })?.items || {};
+  const instances = Object.values(items).flatMap((zone) => zone.instances || []);
+  const running = instances.filter((instance) => instance.status === 'RUNNING').length;
+  return [
+    {
+      name: 'gcp_instance_count',
+      value: instances.length,
+      unit: 'count',
+      source: 'gcp',
+      category: 'inventory',
+      tags: { projectId },
+      timestamp: nowIso(),
+    },
+    {
+      name: 'gcp_instance_running',
+      value: running,
+      unit: 'count',
+      source: 'gcp',
+      category: 'availability',
+      tags: { projectId },
+      timestamp: nowIso(),
+    },
+  ];
+}
+
+async function collectKubernetes(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const apiServer = cfg.apiServer || '';
+  const token = cfg.token || cfg.apiToken || '';
+  if (!apiServer || !token) return [];
+  const headers = { Authorization: `Bearer ${token}` };
+  const [pods, nodes] = await Promise.all([
+    fetchJson(`${apiServer.replace(/\/$/, '')}/api/v1/pods`, { headers }),
+    fetchJson(`${apiServer.replace(/\/$/, '')}/api/v1/nodes`, { headers }),
+  ]);
+  if (!pods.ok) throw new Error('Kubernetes API request failed');
+  const podItems = (pods.data as { items?: Array<{ status?: { phase?: string; containerStatuses?: Array<{ restartCount?: number }> } }> })?.items || [];
+  const nodeItems = (nodes.data as { items?: unknown[] })?.items || [];
+  const running = podItems.filter((p) => p.status?.phase === 'Running').length;
+  const failed = podItems.filter((p) => p.status?.phase === 'Failed' || p.status?.phase === 'CrashLoopBackOff').length;
+  const restarts = podItems.reduce(
+    (sum, pod) => sum + (pod.status?.containerStatuses || []).reduce((acc, c) => acc + (c.restartCount || 0), 0),
+    0
+  );
+  const ns = await fetchJson(`${apiServer.replace(/\/$/, '')}/api/v1/namespaces`, { headers });
+  const nsCount = ((ns.data as { items?: unknown[] })?.items || []).length;
+  const nodeMetrics = await fetchJson(`${apiServer.replace(/\/$/, '')}/apis/metrics.k8s.io/v1beta1/nodes`, { headers });
+  const nodeMetricList =
+    ((nodeMetrics.data as { items?: Array<{ usage?: { cpu?: string; memory?: string } }> })?.items || []);
+  const collected: CollectedMetric[] = [
+    { name: 'k8s_pod_count', value: podItems.length, unit: 'count', source: 'kubernetes', category: 'inventory', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_pod_running', value: running, unit: 'count', source: 'kubernetes', category: 'availability', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_pod_failed', value: failed, unit: 'count', source: 'kubernetes', category: 'quality', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_container_restarts', value: restarts, unit: 'count', source: 'kubernetes', category: 'quality', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_node_count', value: nodeItems.length, unit: 'count', source: 'kubernetes', category: 'inventory', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_namespace_count', value: nsCount, unit: 'count', source: 'kubernetes', category: 'inventory', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_metrics_nodes', value: nodeMetricList.length, unit: 'count', source: 'kubernetes', category: 'performance', tags: {}, timestamp: nowIso() },
+  ];
+  if (nodeMetrics.ok) {
+    let cpuCores = 0;
+    let memoryBytes = 0;
+    for (const item of nodeMetricList) {
+      if (item.usage?.cpu) cpuCores += parseK8sCpuCores(item.usage.cpu);
+      if (item.usage?.memory) memoryBytes += parseK8sMemoryBytes(item.usage.memory);
+    }
+    collected.push(
+      { name: 'k8s_node_cpu_cores', value: Number(cpuCores.toFixed(6)), unit: 'cores', source: 'kubernetes', category: 'performance', tags: {}, timestamp: nowIso() },
+      { name: 'k8s_node_memory_bytes', value: Math.round(memoryBytes), unit: 'bytes', source: 'kubernetes', category: 'performance', tags: {}, timestamp: nowIso() },
+    );
+  }
+  return collected;
+}
+
+async function collectDocker(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const host = cfg.host || cfg.registry || process.env.DOCKER_HOST || '';
+  if (!host) return [];
+  try {
+    const Docker = (await import('dockerode')).default;
+    const docker = host.startsWith('unix://')
+      ? new Docker({ socketPath: host.replace('unix://', '') })
+      : new Docker({ host: cfg.host, port: Number(cfg.port || 2375) });
+    const containers = await docker.listContainers({ all: true });
+    const running = containers.filter((c) => c.State === 'running').length;
+    return [
+      { name: 'docker_containers', value: containers.length, unit: 'count', source: 'docker', category: 'inventory', tags: {}, timestamp: nowIso() },
+      { name: 'docker_running', value: running, unit: 'count', source: 'docker', category: 'availability', tags: {}, timestamp: nowIso() },
+    ];
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : 'Docker collection failed');
+  }
+}
+
+async function collectJenkins(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const url = (cfg.url || process.env.JENKINS_URL || '').replace(/\/$/, '');
+  const username = cfg.username || process.env.JENKINS_USERNAME || '';
+  const apiToken = cfg.apiToken || cfg.token || process.env.JENKINS_API_TOKEN || '';
+  if (!url || !username || !apiToken) return [];
+  const auth = Buffer.from(`${username}:${apiToken}`).toString('base64');
+  const res = await fetchJson(`${url}/api/json?tree=jobs[name,color]`, {
+    headers: { Authorization: `Basic ${auth}` },
+  });
+  if (!res.ok) throw new Error('Jenkins API request failed');
+  const jobs = (res.data as { jobs?: Array<{ color?: string }> })?.jobs || [];
+  const failing = jobs.filter((j) => (j.color || '').includes('red')).length;
+  return [
+    { name: 'jenkins_jobs', value: jobs.length, unit: 'count', source: 'jenkins', category: 'inventory', tags: {}, timestamp: nowIso() },
+    { name: 'jenkins_failing', value: failing, unit: 'count', source: 'jenkins', category: 'quality', tags: {}, timestamp: nowIso() },
+  ];
+}
+
+async function collectGit(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const token = cfg.token || cfg.apiToken || cfg.access_token || process.env.GITHUB_TOKEN || '';
+  const platform = cfg.platform || cfg.type || 'github';
+  if (!token) return [];
+  if (platform === 'gitlab') {
+    const base = (cfg.url || process.env.GITLAB_URL || 'https://gitlab.com').replace(/\/$/, '');
+    const res = await fetchJson(`${base}/api/v4/projects?membership=true&per_page=20`, {
+      headers: { 'PRIVATE-TOKEN': token },
+    });
+    if (!res.ok) throw new Error('GitLab API request failed');
+    const repos = Array.isArray(res.data) ? res.data.length : 0;
+    return [{ name: 'git_repo_count', value: repos, unit: 'count', source: 'gitlab', category: 'inventory', tags: { platform }, timestamp: nowIso() }];
+  }
+  const org = cfg.organization || process.env.GITHUB_ORGANIZATION || '';
+  const url = org ? `https://api.github.com/orgs/${org}/repos?per_page=20` : 'https://api.github.com/user/repos?per_page=20';
+  const res = await fetchJson(url, {
+    headers: { Authorization: `Bearer ${token}`, 'User-Agent': 'devops-ai-sentinel', Accept: 'application/vnd.github+json' },
+  });
+  if (!res.ok) throw new Error('GitHub API request failed');
+  const repos = Array.isArray(res.data) ? res.data.length : 0;
+  return [{ name: 'git_repo_count', value: repos, unit: 'count', source: 'github', category: 'inventory', tags: { platform }, timestamp: nowIso() }];
+}
+
+async function collectPrometheus(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const url = (cfg.url || cfg.prometheusUrl || '').replace(/\/$/, '');
+  if (!url) return [];
+  const headers: Record<string, string> = {};
+  if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
+  const queries = String(cfg.query || cfg.queries || 'up')
+    .split(',')
+    .map((q) => q.trim())
+    .filter(Boolean);
+  if (!queries.includes('up')) queries.unshift('up');
+  const metrics: CollectedMetric[] = [];
+  for (const query of queries.slice(0, 8)) {
+    const res = await fetchJson(`${url}/api/v1/query?query=${encodeURIComponent(query)}`, { headers });
+    if (!res.ok) throw new Error(`Prometheus query failed: ${query}`);
+    const result = (res.data as { data?: { result?: Array<{ value?: [number, string] }> } })?.data?.result || [];
+    const numeric = result.map((row) => Number(row.value?.[1] || 0)).filter((n) => Number.isFinite(n));
+    const value = query === 'up' ? result.length : numeric.reduce((sum, n) => sum + n, 0);
+    const name = query === 'up' ? 'prometheus_up_series' : `promql_${query.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 48)}`;
+    metrics.push({
+      name,
+      value: Number(value.toFixed(4)),
+      unit: query === 'up' ? 'count' : 'value',
+      source: 'prometheus',
+      category: 'availability',
+      tags: { query },
+      timestamp: nowIso(),
+    });
+  }
+  return metrics;
+}
+
+type CwDimension = { Name?: string; Value?: string };
+type CwListedMetric = { Dimensions?: CwDimension[] };
+type CwDatapoint = { Average?: number; Sum?: number; Timestamp?: Date };
+type CwClient = {
+  send: (cmd: unknown) => Promise<{ Metrics?: CwListedMetric[]; Datapoints?: CwDatapoint[] }>;
+};
+
+function firstCwDimension(metrics: CwListedMetric[], name: string): { Name: string; Value: string } | undefined {
+  for (const metric of metrics) {
+    const dim = metric.Dimensions?.find((d) => d.Name === name && d.Value);
+    if (dim?.Name && dim.Value) return { Name: dim.Name, Value: dim.Value };
+  }
+  return undefined;
+}
+
+function s3BucketDimensions(metrics: CwListedMetric[]): Array<{ Name: string; Value: string }> | undefined {
+  let chosen: CwListedMetric | undefined;
+  for (const metric of metrics) {
+    const bucket = metric.Dimensions?.find((d) => d.Name === 'BucketName' && d.Value);
+    if (!bucket) continue;
+    const standard = metric.Dimensions?.find((d) => d.Name === 'StorageType' && d.Value === 'StandardStorage');
+    if (standard) {
+      chosen = metric;
+      break;
+    }
+    if (!chosen) chosen = metric;
+  }
+  if (!chosen) return undefined;
+  const dims: Array<{ Name: string; Value: string }> = [];
+  for (const name of ['BucketName', 'StorageType'] as const) {
+    const dim = chosen.Dimensions?.find((d) => d.Name === name && d.Value);
+    if (dim?.Name && dim.Value) dims.push({ Name: dim.Name, Value: dim.Value });
+  }
+  return dims.length ? dims : undefined;
+}
+
+function latestCwValue(datapoints: CwDatapoint[] | undefined, statistic: 'Average' | 'Sum'): number | undefined {
+  const datapoint = (datapoints || [])
+    .slice()
+    .sort((a, b) => (b.Timestamp?.getTime() || 0) - (a.Timestamp?.getTime() || 0))[0];
+  const value = statistic === 'Sum' ? datapoint?.Sum : datapoint?.Average;
+  return value !== undefined ? Number(value) : undefined;
+}
+
+async function collectAwsExtra(cw: CwClient, region: string): Promise<CollectedMetric[]> {
+  try {
+    const { ListMetricsCommand, GetMetricStatisticsCommand } = await import('@aws-sdk/client-cloudwatch');
+    const namespaces = [
+      { ns: 'AWS/RDS', name: 'aws_rds_metric_streams' },
+      { ns: 'AWS/S3', name: 'aws_s3_metric_streams' },
+      { ns: 'AWS/ApplicationELB', name: 'aws_alb_metric_streams' },
+      { ns: 'AWS/Lambda', name: 'aws_lambda_metric_streams' },
+    ];
+    const extra: CollectedMetric[] = [];
+    const listedByNs: Record<string, CwListedMetric[]> = {};
+    for (const item of namespaces) {
+      const listed = await cw.send(new ListMetricsCommand({ Namespace: item.ns }));
+      listedByNs[item.ns] = listed.Metrics || [];
+      extra.push({
+        name: item.name,
+        value: listed.Metrics?.length || 0,
+        unit: 'count',
+        source: 'aws',
+        category: 'inventory',
+        tags: { region, namespace: item.ns },
+        timestamp: nowIso(),
+      });
+    }
+
+    const fiveMin = { startOffsetMs: 5 * 60 * 1000, period: 300 };
+    const twoDays = { startOffsetMs: 2 * 24 * 60 * 60 * 1000, period: 86400 };
+
+    const statisticFor = async (
+      namespace: string,
+      metricName: string,
+      statistic: 'Average' | 'Sum',
+      dimensions: Array<{ Name: string; Value: string }>,
+      window: { startOffsetMs: number; period: number } = fiveMin
+    ): Promise<number | undefined> => {
+      try {
+        const end = new Date();
+        const start = new Date(end.getTime() - window.startOffsetMs);
+        const result = await cw.send(new GetMetricStatisticsCommand({
+          Namespace: namespace,
+          MetricName: metricName,
+          Dimensions: dimensions,
+          StartTime: start,
+          EndTime: end,
+          Period: window.period,
+          Statistics: [statistic],
+        }));
+        return latestCwValue(result.Datapoints, statistic);
+      } catch {
+        return undefined;
+      }
+    };
+
+    const rdsId = firstCwDimension(listedByNs['AWS/RDS'] || [], 'DBInstanceIdentifier');
+    if (rdsId) {
+      const value = await statisticFor('AWS/RDS', 'CPUUtilization', 'Average', [rdsId]);
+      if (value !== undefined) {
+        extra.push({
+          name: 'aws_rds_cpu_usage',
+          value: Number(value.toFixed(2)),
+          unit: '%',
+          source: 'aws',
+          category: 'performance',
+          tags: { region, dbInstance: rdsId.Value },
+          timestamp: nowIso(),
+        });
+      }
+    }
+
+    const lambdaName = firstCwDimension(listedByNs['AWS/Lambda'] || [], 'FunctionName');
+    if (lambdaName) {
+      const value = await statisticFor('AWS/Lambda', 'Invocations', 'Sum', [lambdaName]);
+      if (value !== undefined) {
+        extra.push({
+          name: 'aws_lambda_invocations',
+          value: Number(value),
+          unit: 'count',
+          source: 'aws',
+          category: 'performance',
+          tags: { region, function: lambdaName.Value },
+          timestamp: nowIso(),
+        });
+      }
+    }
+
+    const alb = firstCwDimension(listedByNs['AWS/ApplicationELB'] || [], 'LoadBalancer');
+    if (alb) {
+      const value = await statisticFor('AWS/ApplicationELB', 'RequestCount', 'Sum', [alb]);
+      if (value !== undefined) {
+        extra.push({
+          name: 'aws_alb_request_count',
+          value: Number(value),
+          unit: 'count',
+          source: 'aws',
+          category: 'performance',
+          tags: { region, loadBalancer: alb.Value },
+          timestamp: nowIso(),
+        });
+      }
+    }
+
+    const s3Dims = s3BucketDimensions(listedByNs['AWS/S3'] || []);
+    if (s3Dims) {
+      const value = await statisticFor('AWS/S3', 'BucketSizeBytes', 'Average', s3Dims, twoDays);
+      if (value !== undefined) {
+        extra.push({
+          name: 'aws_s3_bucket_bytes',
+          value: Number(value),
+          unit: 'bytes',
+          source: 'aws',
+          category: 'performance',
+          tags: { region, bucket: s3Dims.find((d) => d.Name === 'BucketName')?.Value || '' },
+          timestamp: nowIso(),
+        });
+      }
+    }
+
+    return extra;
+  } catch {
+    return [];
+  }
+}
+
+async function collectAwsCost(cfg: Record<string, string>, creds: { accessKeyId: string; secretAccessKey: string }, region: string): Promise<CollectedMetric[]> {
+  try {
+    const { CostExplorerClient, GetCostAndUsageCommand } = await import('@aws-sdk/client-cost-explorer');
+    const end = new Date();
+    const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const ce = new CostExplorerClient({ region: region.startsWith('us-') ? 'us-east-1' : region, credentials: creds });
+    const result = await ce.send(new GetCostAndUsageCommand({
+      TimePeriod: { Start: fmt(start), End: fmt(end) },
+      Granularity: 'MONTHLY',
+      Metrics: ['UnblendedCost'],
+    }));
+    const amount = Number(result.ResultsByTime?.[0]?.Total?.UnblendedCost?.Amount || 0);
+    return [{
+      name: 'aws_unblended_cost',
+      value: Number(amount.toFixed(2)),
+      unit: result.ResultsByTime?.[0]?.Total?.UnblendedCost?.Unit || 'USD',
+      source: 'aws',
+      category: 'cost',
+      tags: { region },
+      timestamp: nowIso(),
+    }];
+  } catch {
+    return [];
+  }
+}
+
+async function collectTerraform(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const token = cfg.token || cfg.apiToken || '';
+  const org = cfg.organization || cfg.organizationName || '';
+  if (!token || !org) return [];
+  const res = await fetchJson(`https://app.terraform.io/api/v2/organizations/${encodeURIComponent(org)}/workspaces`, {
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/vnd.api+json' },
+  });
+  if (!res.ok) throw new Error('Terraform Cloud API request failed');
+  const count = Array.isArray((res.data as { data?: unknown[] })?.data) ? (res.data as { data: unknown[] }).data.length : 0;
+  return [{ name: 'terraform_workspaces', value: count, unit: 'count', source: 'terraform', category: 'inventory', tags: { org }, timestamp: nowIso() }];
+}
+
+async function collectAnsible(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const url = (cfg.url || cfg.towerUrl || '').replace(/\/$/, '');
+  const token = cfg.token || '';
+  if (!url || !token) return [];
+  const res = await fetchJson(`${url}/api/v2/jobs/?page_size=1`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error('Ansible/AWX API request failed');
+  const count = Number((res.data as { count?: number })?.count || 0);
+  return [{ name: 'ansible_jobs', value: count, unit: 'count', source: 'ansible', category: 'inventory', tags: {}, timestamp: nowIso() }];
+}
+
+async function collectBitbucket(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const username = cfg.username || '';
+  const password = cfg.appPassword || cfg.password || cfg.token || '';
+  const workspace = cfg.workspace || '';
+  if (!username || !password) return [];
+  const url = workspace
+    ? `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(workspace)}`
+    : 'https://api.bitbucket.org/2.0/repositories?role=member';
+  const res = await fetchJson(url, {
+    headers: { Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}` },
+  });
+  if (!res.ok) throw new Error('Bitbucket API request failed');
+  const size = Number((res.data as { size?: number; values?: unknown[] })?.size || (res.data as { values?: unknown[] })?.values?.length || 0);
+  return [{ name: 'git_repo_count', value: size, unit: 'count', source: 'bitbucket', category: 'inventory', tags: { workspace }, timestamp: nowIso() }];
+}
+
+export async function probeDatabase(cfg: Record<string, string>): Promise<{ ok: boolean; message: string; latencyMs: number }> {
+  const started = Date.now();
+  const type = (cfg.type || '').toLowerCase();
+  try {
+    if (type === 'postgresql') {
+      const pg = await import('pg');
+      const Client = pg.Client || (pg as { default?: { Client: typeof pg.Client } }).default?.Client;
+      if (!Client) throw new Error('pg Client export missing');
+      const client = new Client({
+        host: cfg.host,
+        port: Number(cfg.port || 5432),
+        user: cfg.username || cfg.user,
+        password: cfg.password,
+        database: cfg.database,
+        ssl: cfg.ssl === 'true' ? { rejectUnauthorized: false } : undefined,
+        connectionTimeoutMillis: 4000,
+      });
+      await client.connect();
+      await client.query('SELECT 1');
+      await client.end();
+    } else if (type === 'mysql') {
+      const mysqlMod = await import('mysql2/promise');
+      const mysql = (mysqlMod as { default?: typeof mysqlMod }).default || mysqlMod;
+      const conn = await mysql.createConnection({
+        host: cfg.host,
+        port: Number(cfg.port || 3306),
+        user: cfg.username || cfg.user,
+        password: cfg.password,
+        database: cfg.database,
+        connectTimeout: 4000,
+      });
+      await conn.query('SELECT 1');
+      await conn.end();
+    } else if (type === 'mongodb') {
+      const { MongoClient } = await import('mongodb');
+      const uri = cfg.connectionString || `mongodb://${cfg.host || '127.0.0.1'}:${cfg.port || 27017}/${cfg.database || 'admin'}`;
+      const client = new MongoClient(uri, { serverSelectionTimeoutMS: 4000 });
+      await client.connect();
+      await client.db().command({ ping: 1 });
+      await client.close();
+    } else if (type === 'redis') {
+      const redis = await import('redis');
+      const createClient = redis.createClient || redis.default.createClient;
+      const client = createClient({
+        socket: { host: cfg.host || '127.0.0.1', port: Number(cfg.port || 6379), connectTimeout: 4000 },
+        password: cfg.password || undefined,
+      });
+      await client.connect();
+      await client.ping();
+      await client.quit();
+    } else if (type === 'sqlite' || type === 'indexeddb' || type === 'localstorage') {
+      await getDb().get('SELECT 1 as ok');
+    } else {
+      return { ok: false, message: `Unsupported database type ${type}`, latencyMs: Date.now() - started };
+    }
+    return { ok: true, message: `${type} connection successful`, latencyMs: Date.now() - started };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : 'connection failed', latencyMs: Date.now() - started };
+  }
+}
+
+async function collectDatabase(cfg: Record<string, string>): Promise<CollectedMetric[]> {
+  const type = cfg.type || 'postgresql';
+  const result = await probeDatabase({ ...cfg, type });
+  if (!result.ok) throw new Error(result.message);
+  return [
+    { name: 'db_up', value: 1, unit: 'bool', source: type, category: 'availability', tags: { host: cfg.host || 'local' }, timestamp: nowIso() },
+    { name: 'db_latency_ms', value: result.latencyMs, unit: 'ms', source: type, category: 'performance', tags: { host: cfg.host || 'local' }, timestamp: nowIso() },
+  ];
+}
+
+const collectors: Record<string, (cfg: Record<string, string>) => Promise<CollectedMetric[]>> = {
+  aws: collectAws,
+  azure: collectAzure,
+  gcp: collectGcp,
+  kubernetes: collectKubernetes,
+  docker: collectDocker,
+  jenkins: collectJenkins,
+  github: collectGit,
+  gitlab: collectGit,
+  git: collectGit,
+  bitbucket: collectBitbucket,
+  azure_devops: collectGit,
+  prometheus: collectPrometheus,
+  terraform: collectTerraform,
+  ansible: collectAnsible,
+  postgresql: collectDatabase,
+  mysql: collectDatabase,
+  mongodb: collectDatabase,
+  redis: collectDatabase,
+  sqlite: collectDatabase,
+};
+
+export async function collectAllMetrics(orgId?: string): Promise<CollectedMetric[]> {
+  const metrics: CollectedMetric[] = [];
+  if (!orgId || await orgWantsHostMetrics(orgId)) {
+    metrics.push(...collectHostMetrics());
+  }
+  const integrations = await listIntegrations(orgId);
+  const db = getDb();
+
+  for (const integration of integrations) {
+    const fn = collectors[integration.type];
+    if (!fn) continue;
+    const cfg = normalizeIntegrationConfig(integration.type, decryptJson<Record<string, string>>(integration.config_encrypted, {}));
+    try {
+      const extra = await fn(cfg);
+      metrics.push(...extra);
+      await db.run('UPDATE integrations SET status = ?, last_sync = ?, error = NULL WHERE id = ?', ['connected', nowIso(), integration.id]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'collection failed';
+      await db.run('UPDATE integrations SET status = ?, last_sync = ?, error = ? WHERE id = ?', ['error', nowIso(), message, integration.id]);
+    }
+  }
+
+  return metrics;
+}
+
+export async function persistMetrics(metrics: CollectedMetric[], orgId: string): Promise<void> {
+  const db = getDb();
+  const days = Math.min(Math.max(Number(config.metricsRetentionDays || 90), 7), 365);
+  for (const metric of metrics) {
+    await db.run(
+      'INSERT INTO metrics (org_id, name, value, unit, source, category, tags, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [orgId, metric.name, metric.value, metric.unit, metric.source, metric.category, JSON.stringify(metric.tags), metric.timestamp]
+    );
+  }
+  await db.run(`DELETE FROM metrics WHERE org_id = ? AND timestamp < ?`, [orgId, new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()]);
+}
+
+export function overviewFromMetrics(metrics: CollectedMetric[]): {
+  systemHealth: number;
+  activeServices: string;
+  resourceUsage: number;
+  responseTimeMs: number;
+} {
+  const cpu = metrics.find((m) => m.name === 'cpu_usage')?.value ?? 0;
+  const mem = metrics.find((m) => m.name === 'memory_usage')?.value ?? 0;
+  const disk = metrics.find((m) => m.name === 'disk_usage')?.value ?? 0;
+  const resourceUsage = Number(((cpu + mem + disk) / 3).toFixed(1));
+  const health = Number(Math.max(0, 100 - Math.max(cpu, mem, disk) * 0.2).toFixed(1));
+  const connected = metrics.filter((m) => m.source !== 'host').length;
+  return {
+    systemHealth: health,
+    activeServices: `${1 + connected}/${1 + connected}`,
+    resourceUsage,
+    responseTimeMs: Math.max(1, Math.round(cpu)),
+  };
+}
+
+export { config };

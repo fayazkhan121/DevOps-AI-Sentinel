@@ -1,96 +1,81 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Eye, EyeOff, Shield, Database, Cloud, Server, RefreshCw } from "lucide-react";
+import { Eye, EyeOff, Shield } from "lucide-react";
 import { authService } from "@/services/authService";
-import { advancedDatabase } from "@/services/advancedDatabase";
+import { apiFetch } from "@/lib/apiClient";
+import { API_CONFIG } from "@/config/api";
 
 const Login = () => {
-  // Simple hash function for passwords
-  const hashPassword = async (password: string): Promise<string> => {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(password + 'devops-ai-sentinel-secret-key');
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  };
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [org, setOrg] = useState("");
+  const [totp, setTotp] = useState("");
+  const [requiresTotp, setRequiresTotp] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+  const [infoMessage, setInfoMessage] = useState("");
   const [isFirstTimeSetup, setIsFirstTimeSetup] = useState(false);
   const [setupStep, setSetupStep] = useState(1);
   const [setupData, setSetupData] = useState({
     adminUsername: "admin",
-    adminPassword: "admin",
+    adminPassword: "",
     adminEmail: "admin@devops-ai-sentinel.local",
     adminFullName: "System Administrator",
     systemName: "DevOps AI Sentinel",
     companyName: "",
     timezone: "UTC",
-    databaseType: "local",
-    dbHost: "",
-    dbPort: "",
-    dbName: "",
-    dbUser: "",
-    dbPassword: ""
   });
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [showAcceptInvite, setShowAcceptInvite] = useState(false);
+  const [inviteToken, setInviteToken] = useState("");
+  const [inviteUsername, setInviteUsername] = useState("");
+  const [invitePassword, setInvitePassword] = useState("");
+  const [forgotUsername, setForgotUsername] = useState("");
+  const [forgotOrg, setForgotOrg] = useState("");
+  const [resetToken, setResetToken] = useState<string | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [authMethods, setAuthMethods] = useState({ github: false, oidc: false, saml: false, smtp: false });
   
   const [rememberMe, setRememberMe] = useState(false);
 
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   useEffect(() => {
+    const sso = searchParams.get('sso');
+    if (sso) {
+      void apiFetch<{ user: Parameters<typeof authService.applySsoToken>[1] }>('/auth/me', {
+        headers: { Authorization: `Bearer ${sso}` },
+      }).then((data) => {
+        if (data.user) {
+          authService.applySsoToken(sso, data.user as never);
+          navigate('/', { replace: true });
+        }
+      }).catch(() => setError('SSO login failed'));
+      return;
+    }
     checkFirstTimeSetup();
+  }, [searchParams, navigate]);
+
+  useEffect(() => {
+    void authService.getAuthMethods().then(setAuthMethods).catch(() => {
+      setAuthMethods({ github: false, oidc: false, saml: false, smtp: false });
+    });
   }, []);
 
   const checkFirstTimeSetup = async () => {
     try {
-      // Check localStorage first for users
-      const localUsers = JSON.parse(localStorage.getItem('users') || '[]');
-      console.log('Found users in localStorage:', localUsers);
-      
-      if (localUsers.length === 0) {
-        // Also check advancedDatabase as fallback
-        try {
-          const dbUsers = await advancedDatabase.getMetric('users') || [];
-          console.log('Found users in database:', dbUsers);
-          if (Array.isArray(dbUsers) && dbUsers.length === 0) {
-            console.log('No users found anywhere, showing setup wizard');
-            setIsFirstTimeSetup(true);
-          } else {
-            console.log('Users found in database, showing login form');
-            setIsFirstTimeSetup(false);
-          }
-        } catch (dbError) {
-          console.log('Database check failed, showing setup wizard');
-          setIsFirstTimeSetup(true);
-        }
-      } else {
-        console.log('Users found in localStorage, showing login form');
-        setIsFirstTimeSetup(false);
-      }
+      setIsFirstTimeSetup(await authService.needsSetup());
     } catch (error) {
       console.error('Failed to check first-time setup:', error);
       setIsFirstTimeSetup(true);
-    }
-  };
-
-  const clearDataAndReset = async () => {
-    try {
-      // Clear localStorage to force first-time setup
-      localStorage.clear();
-      console.log('Data cleared, resetting to first-time setup');
-      setIsFirstTimeSetup(true);
-      setError('');
-    } catch (error) {
-      console.error('Failed to clear data:', error);
-      setError('Failed to reset system');
     }
   };
 
@@ -98,13 +83,16 @@ const Login = () => {
     e.preventDefault();
     setIsLoading(true);
     setError("");
+    setInfoMessage("");
 
     try {
-      const response = await authService.login({ username, password, rememberMe });
+      const response = await authService.login({ username, password, rememberMe, org: org || undefined, totp: totp || undefined });
       
       if (response.success) {
-        // Redirect to dashboard (authService already stores the data)
         navigate('/', { replace: true });
+      } else if (response.requiresTotp) {
+        setRequiresTotp(true);
+        setError(response.message || 'Enter your authenticator code');
       } else {
         setError(response.message || 'Login failed');
       }
@@ -121,71 +109,21 @@ const Login = () => {
     setError("");
 
     try {
-      // Create admin user directly in localStorage for now
-      const adminUser = {
-        id: `user-${Date.now()}`,
-        username: setupData.adminUsername,
-        email: setupData.adminEmail,
-        fullName: setupData.adminFullName,
-        role: 'admin' as const,
-        permissions: [
-          'user:read', 'user:write', 'user:delete',
-          'system:read', 'system:write', 'system:delete',
-          'monitoring:read', 'monitoring:write',
-          'alerts:read', 'alerts:write',
-          'settings:read', 'settings:write',
-          'logs:read', 'logs:write'
-        ],
-        passwordHash: await hashPassword(setupData.adminPassword),
-        isActive: true,
-        lastLogin: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        failedLoginAttempts: 0,
-        lockedUntil: null
-      };
-
-      console.log('Created admin user:', adminUser);
-
-      // Save user to localStorage
-      const existingUsers = JSON.parse(localStorage.getItem('users') || '[]');
-      existingUsers.push(adminUser);
-      localStorage.setItem('users', JSON.stringify(existingUsers));
-      console.log('Saved user to localStorage, total users:', existingUsers.length);
-
-      // Store system configuration in localStorage
-      localStorage.setItem('system_config', JSON.stringify({
+      const response = await authService.completeSetup({
+        adminUsername: setupData.adminUsername,
+        adminPassword: setupData.adminPassword,
+        adminEmail: setupData.adminEmail,
+        adminFullName: setupData.adminFullName,
         systemName: setupData.systemName,
         companyName: setupData.companyName,
-        timezone: setupData.timezone,
-        databaseType: setupData.databaseType,
-        setupCompleted: true,
-        setupDate: new Date().toISOString()
-      }));
-
-      // Auto-login with admin credentials
-      try {
-        const response = await authService.login({ 
-          username: setupData.adminUsername, 
-          password: setupData.adminPassword,
-          rememberMe: false
-        });
-
-        if (response.success) {
-          console.log('Setup completed successfully, redirecting to dashboard');
-          navigate('/', { replace: true });
-        } else {
-          setError('Setup completed but auto-login failed. Please login manually.');
-          setIsFirstTimeSetup(false);
-        }
-      } catch (loginError) {
-        console.error('Auto-login error:', loginError);
-        setError('Setup completed but auto-login failed. Please login manually.');
-        setIsFirstTimeSetup(false);
+      });
+      if (response.success) {
+        navigate('/', { replace: true });
+      } else {
+        setError(response.message || 'Setup failed. Please try again.');
       }
-
     } catch (error) {
-      setError('Setup failed. Please try again.');
+      setError(error instanceof Error ? error.message : 'Setup failed. Please try again.');
       console.error('Setup error:', error);
     } finally {
       setIsLoading(false);
@@ -193,7 +131,7 @@ const Login = () => {
   };
 
   const nextSetupStep = () => {
-    if (setupStep < 3) {
+    if (setupStep < 2) {
       setSetupStep(setupStep + 1);
     }
   };
@@ -202,6 +140,104 @@ const Login = () => {
     if (setupStep > 1) {
       setSetupStep(setupStep - 1);
     }
+  };
+
+  const toggleForgotPassword = () => {
+    const next = !showForgotPassword;
+    setShowForgotPassword(next);
+    setResetToken(null);
+    setNewPassword("");
+    setConfirmPassword("");
+    setError("");
+    setInfoMessage("");
+    if (next) {
+      setForgotUsername(username);
+      setForgotOrg(org);
+    }
+  };
+
+  const handleForgotPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    setError("");
+    setInfoMessage("");
+    try {
+      const response = await authService.forgotPassword({
+        username: forgotUsername,
+        org: forgotOrg || undefined,
+      });
+      if (!response.success) {
+        setError(response.message || "Request failed");
+      } else if (response.token) {
+        setResetToken(response.token);
+      } else if (response.message) {
+        setInfoMessage(response.message);
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Request failed");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPassword !== confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
+    if (!resetToken) return;
+    setIsLoading(true);
+    setError("");
+    setInfoMessage("");
+    try {
+      const response = await authService.resetPassword({ token: resetToken, password: newPassword });
+      if (response.success) {
+        setResetToken(null);
+        setShowForgotPassword(false);
+        setNewPassword("");
+        setConfirmPassword("");
+        if (response.message) setInfoMessage(response.message);
+      } else {
+        setError(response.message || "Request failed");
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Request failed");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleAcceptInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    setError("");
+    setInfoMessage("");
+    try {
+      const response = await authService.acceptInvite({
+        token: inviteToken,
+        username: inviteUsername,
+        password: invitePassword,
+      });
+      if (response.success) {
+        setShowAcceptInvite(false);
+        setInviteToken("");
+        setInviteUsername("");
+        setInvitePassword("");
+        setInfoMessage(response.message || "Invite accepted. Sign in with your new account.");
+      } else {
+        setError(response.message || "Request failed");
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Request failed");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const startExternalAuth = (path: "/auth/github" | "/auth/oidc/start" | "/auth/saml/login") => {
+    const qs = org ? `?org=${encodeURIComponent(org)}` : "";
+    window.location.assign(`${API_CONFIG.API_URL}${path}${qs}`);
   };
 
   if (isFirstTimeSetup) {
@@ -248,89 +284,14 @@ const Login = () => {
                       onChange={(e) => setSetupData({...setupData, timezone: e.target.value})}
                     />
                   </div>
+                  <p className="text-sm text-muted-foreground">
+                    The application database is set with DATABASE_TYPE, SQLITE_PATH, or Postgres environment variables on the server. This wizard does not switch it.
+                  </p>
                 </div>
               </div>
             )}
 
             {setupStep === 2 && (
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Database Configuration</h3>
-                <div className="grid gap-4">
-                  <div>
-                    <Label htmlFor="databaseType">Initial Database Type</Label>
-                    <select
-                      id="databaseType"
-                      value={setupData.databaseType}
-                      onChange={(e) => setSetupData({...setupData, databaseType: e.target.value})}
-                      className="w-full p-2 border rounded-md"
-                    >
-                      <option value="local">Local Storage (IndexedDB) - Recommended for setup</option>
-                      <option value="postgresql">PostgreSQL</option>
-                      <option value="mysql">MySQL</option>
-                      <option value="mongodb">MongoDB</option>
-                      <option value="redis">Redis</option>
-                    </select>
-                  </div>
-                  
-                  {setupData.databaseType !== 'local' && (
-                    <div className="space-y-4 p-4 border rounded-md">
-                      <h4 className="font-medium">External Database Configuration</h4>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <Label htmlFor="dbHost">Host</Label>
-                          <Input
-                            id="dbHost"
-                            placeholder="localhost"
-                            onChange={(e) => setSetupData({...setupData, dbHost: e.target.value})}
-                          />
-                        </div>
-                        <div>
-                          <Label htmlFor="dbPort">Port</Label>
-                          <Input
-                            id="dbPort"
-                            placeholder="5432"
-                            onChange={(e) => setSetupData({...setupData, dbPort: e.target.value})}
-                          />
-                        </div>
-                        <div>
-                          <Label htmlFor="dbName">Database Name</Label>
-                          <Input
-                            id="dbName"
-                            placeholder="devops_sentinel"
-                            onChange={(e) => setSetupData({...setupData, dbName: e.target.value})}
-                          />
-                        </div>
-                        <div>
-                          <Label htmlFor="dbUser">Username</Label>
-                          <Input
-                            id="dbUser"
-                            placeholder="username"
-                            onChange={(e) => setSetupData({...setupData, dbUser: e.target.value})}
-                          />
-                        </div>
-                        <div className="col-span-2">
-                          <Label htmlFor="dbPassword">Password</Label>
-                          <Input
-                            id="dbPassword"
-                            type="password"
-                            placeholder="password"
-                            onChange={(e) => setSetupData({...setupData, dbPassword: e.target.value})}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  
-                  <div className="p-4 bg-blue-50 border border-blue-200 rounded-md">
-                    <p className="text-sm text-blue-800">
-                      <strong>Note:</strong> You can always add more database connections and configure external databases later in the Database Settings page.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {setupStep === 3 && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Admin Account</h3>
                 <div className="grid gap-4">
@@ -403,7 +364,7 @@ const Login = () => {
                 Previous
               </Button>
               
-              {setupStep < 3 ? (
+              {setupStep < 2 ? (
                 <Button onClick={nextSetupStep}>
                   Next
                 </Button>
@@ -416,7 +377,7 @@ const Login = () => {
 
             <div className="text-center">
               <p className="text-sm text-muted-foreground">
-                Step {setupStep} of 3
+                Step {setupStep} of 2
               </p>
             </div>
           </CardContent>
@@ -424,6 +385,8 @@ const Login = () => {
       </div>
     );
   }
+
+  const hasExternalAuth = authMethods.github || authMethods.oidc || authMethods.saml;
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
@@ -439,6 +402,15 @@ const Login = () => {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleLogin} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="org">Organization</Label>
+              <Input
+                id="org"
+                value={org}
+                onChange={(e) => setOrg(e.target.value)}
+                placeholder="Optional org name or id"
+              />
+            </div>
             <div className="space-y-2">
               <Label htmlFor="username">Username</Label>
               <Input
@@ -471,11 +443,28 @@ const Login = () => {
                 </Button>
               </div>
             </div>
+            {requiresTotp && (
+              <div className="space-y-2">
+                <Label htmlFor="totp">Authenticator code</Label>
+                <Input
+                  id="totp"
+                  value={totp}
+                  onChange={(e) => setTotp(e.target.value)}
+                  placeholder="6-digit code"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                />
+              </div>
+            )}
             
             {error && (
               <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-md">
                 <p className="text-sm text-destructive">{error}</p>
               </div>
+            )}
+
+            {infoMessage && (
+              <p className="text-sm text-muted-foreground">{infoMessage}</p>
             )}
 
                          <div className="flex items-center space-x-2">
@@ -496,46 +485,140 @@ const Login = () => {
              </Button>
           </form>
 
-          <div className="mt-6 space-y-4">
-            <div className="text-center">
-              <p className="text-sm text-muted-foreground">
-                Default credentials: admin / admin
-              </p>
-            </div>
-            
-            {/* Debug and Reset buttons for testing */}
-            <div className="text-center space-y-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  const users = JSON.parse(localStorage.getItem('users') || '[]');
-                  const config = localStorage.getItem('system_config');
-                  console.log('Current localStorage state:', { users, config });
-                  alert(`Users: ${users.length}, Config: ${config ? 'Yes' : 'No'}`);
-                }}
-                className="text-xs"
-              >
-                Debug: Check localStorage
-              </Button>
-              
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={clearDataAndReset}
-                className="text-xs"
-              >
-                <RefreshCw className="h-3 w-3 mr-1" />
-                Reset System (Clear Data)
-              </Button>
-            </div>
+          <div className="mt-3 flex gap-4">
+            <Button type="button" variant="link" className="h-auto p-0 text-sm" onClick={toggleForgotPassword}>
+              Forgot password
+            </Button>
+            <Button
+              type="button"
+              variant="link"
+              className="h-auto p-0 text-sm"
+              onClick={() => {
+                setShowAcceptInvite(!showAcceptInvite);
+                setError("");
+                setInfoMessage("");
+              }}
+            >
+              Accept invite
+            </Button>
           </div>
+
+          {showForgotPassword && !resetToken && (
+            <form onSubmit={handleForgotPassword} className="mt-3 space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="forgotOrg">Organization</Label>
+                <Input
+                  id="forgotOrg"
+                  value={forgotOrg}
+                  onChange={(e) => setForgotOrg(e.target.value)}
+                  placeholder="Optional org name or id"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="forgotUsername">Username</Label>
+                <Input
+                  id="forgotUsername"
+                  value={forgotUsername}
+                  onChange={(e) => setForgotUsername(e.target.value)}
+                  placeholder="Enter username"
+                  required
+                />
+              </div>
+              <Button type="submit" variant="outline" className="w-full" disabled={isLoading}>
+                {isLoading ? "Submitting..." : "Submit"}
+              </Button>
+            </form>
+          )}
+
+          {resetToken && (
+            <form onSubmit={handleResetPassword} className="mt-3 space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="newPassword">New password</Label>
+                <Input
+                  id="newPassword"
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Enter new password"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="confirmPassword">Confirm password</Label>
+                <Input
+                  id="confirmPassword"
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm new password"
+                  required
+                />
+              </div>
+              <Button type="submit" variant="outline" className="w-full" disabled={isLoading}>
+                {isLoading ? "Resetting..." : "Reset password"}
+              </Button>
+            </form>
+          )}
+
+          {showAcceptInvite && (
+            <form onSubmit={handleAcceptInvite} className="mt-3 space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="inviteToken">Invite token</Label>
+                <Input
+                  id="inviteToken"
+                  value={inviteToken}
+                  onChange={(e) => setInviteToken(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="inviteUsername">Username</Label>
+                <Input
+                  id="inviteUsername"
+                  value={inviteUsername}
+                  onChange={(e) => setInviteUsername(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="invitePassword">Password</Label>
+                <Input
+                  id="invitePassword"
+                  type="password"
+                  value={invitePassword}
+                  onChange={(e) => setInvitePassword(e.target.value)}
+                  required
+                />
+              </div>
+              <Button type="submit" variant="outline" className="w-full" disabled={isLoading}>
+                {isLoading ? "Accepting..." : "Accept invite"}
+              </Button>
+            </form>
+          )}
+
+          {hasExternalAuth && (
+            <div className="mt-4 space-y-2">
+              {authMethods.github && (
+                <Button type="button" variant="outline" className="w-full" onClick={() => startExternalAuth("/auth/github")}>
+                  Continue with GitHub
+                </Button>
+              )}
+              {authMethods.oidc && (
+                <Button type="button" variant="outline" className="w-full" onClick={() => startExternalAuth("/auth/oidc/start")}>
+                  Continue with OIDC
+                </Button>
+              )}
+              {authMethods.saml && (
+                <Button type="button" variant="outline" className="w-full" onClick={() => startExternalAuth("/auth/saml/login")}>
+                  Continue with SAML
+                </Button>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
   );
 };
 
-export default Login; 
+export default Login;

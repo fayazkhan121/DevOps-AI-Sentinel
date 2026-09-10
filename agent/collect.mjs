@@ -25,9 +25,14 @@ function diskUsed(mount = '/') {
 }
 
 const total = os.totalmem();
+const cpuCount = os.cpus().length;
+const cpuUsage = cpuCount
+  ? Math.min(100, Math.max(0, ((os.loadavg()[0] || 0) / cpuCount) * 100))
+  : 0;
 const payload = {
   metrics: [
-    { name: 'agent_cpu_cores', value: os.cpus().length, unit: 'count', source: os.hostname(), category: 'inventory' },
+    { name: 'agent_cpu_cores', value: cpuCount, unit: 'count', source: os.hostname(), category: 'inventory' },
+    { name: 'agent_cpu_usage', value: Number(cpuUsage.toFixed(2)), unit: '%', source: os.hostname(), category: 'performance' },
     { name: 'agent_memory_usage', value: total ? Number((((total - os.freemem()) / total) * 100).toFixed(2)) : 0, unit: '%', source: os.hostname(), category: 'performance' },
     { name: 'agent_disk_usage', value: diskUsed(), unit: '%', source: os.hostname(), category: 'performance' },
     { name: 'agent_load', value: Number((os.loadavg()[0] || 0).toFixed(2)), unit: 'load', source: os.hostname(), category: 'performance' },

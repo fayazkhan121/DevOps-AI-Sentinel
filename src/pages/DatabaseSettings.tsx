@@ -18,14 +18,13 @@ import {
   XCircle,
   AlertCircle,
   Server,
-  HardDrive,
-  Cloud
+  HardDrive
 } from "lucide-react";
 import { databaseManager, DatabaseConnection, DatabaseResult } from "@/services/databaseManager";
 
 const DatabaseSettings = () => {
   const [connections, setConnections] = useState<DatabaseConnection[]>([]);
-  const [defaultConnection, setDefaultConnection] = useState<string>('local');
+  const [defaultConnection, setDefaultConnection] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [activeTab, setActiveTab] = useState("connections");
   const [testResults, setTestResults] = useState<Record<string, DatabaseResult>>({});
@@ -122,11 +121,6 @@ const DatabaseSettings = () => {
   };
 
   const handleRemoveConnection = async (connectionId: string) => {
-    if (connectionId === 'local' || connectionId === 'indexeddb') {
-      alert('Cannot remove default local connections');
-      return;
-    }
-
     if (confirm('Are you sure you want to remove this connection?')) {
       try {
         const success = await databaseManager.removeConnection(connectionId);
@@ -177,7 +171,7 @@ const DatabaseSettings = () => {
   };
 
   const handleRestoreDatabase = async (connectionId: string, backupId: string) => {
-    if (confirm('Are you sure you want to restore this backup? This will overwrite current data.')) {
+    if (confirm('Are you sure you want to restore this backup? This will overwrite current data with this organization\'s JSON snapshot.')) {
       setIsLoading(true);
       try {
         const result = await databaseManager.restoreDatabase(connectionId, backupId);
@@ -206,9 +200,6 @@ const DatabaseSettings = () => {
         return <HardDrive className="h-4 w-4" />;
       case 'sqlite':
         return <HardDrive className="h-4 w-4" />;
-      case 'indexeddb':
-      case 'localStorage':
-        return <Cloud className="h-4 w-4" />;
       default:
         return <Database className="h-4 w-4" />;
     }
@@ -290,17 +281,15 @@ const DatabaseSettings = () => {
                     <div className="flex items-center gap-2">
                       {getConnectionStatusBadge(connection)}
                       
-                      {connection.id !== 'local' && connection.id !== 'indexeddb' && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleTestConnection(connection.id)}
-                          disabled={isLoading}
-                        >
-                          {getTestResultIcon(connection.id)}
-                          Test
-                        </Button>
-                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleTestConnection(connection.id)}
+                        disabled={isLoading}
+                      >
+                        {getTestResultIcon(connection.id)}
+                        Test
+                      </Button>
                       
                       {defaultConnection === connection.id ? (
                         <Badge variant="outline">Default</Badge>
@@ -314,15 +303,13 @@ const DatabaseSettings = () => {
                         </Button>
                       )}
                       
-                      {connection.id !== 'local' && connection.id !== 'indexeddb' && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleRemoveConnection(connection.id)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleRemoveConnection(connection.id)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -476,7 +463,7 @@ const DatabaseSettings = () => {
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                {connections.filter(c => c.id !== 'local' && c.id !== 'indexeddb').map((connection) => (
+                {connections.map((connection) => (
                   <div key={connection.id} className="p-4 border rounded-lg">
                     <div className="flex items-center justify-between mb-3">
                       <h3 className="font-semibold">{connection.name}</h3>

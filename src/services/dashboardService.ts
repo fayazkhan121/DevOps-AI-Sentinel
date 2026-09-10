@@ -241,18 +241,8 @@ export class DashboardService {
       }
     ];
 
-    // Save templates to localStorage
-    try {
-      localStorage.setItem('dashboard_templates', JSON.stringify(defaultTemplates));
-    } catch (error) {
-      console.error('Failed to save default templates:', error);
-    }
-
-    // Also try to save in advancedDatabase
-    try {
-      await advancedDatabase.saveMetric('dashboard_templates', defaultTemplates);
-    } catch (error) {
-      console.error('Failed to save templates to database:', error);
+    for (const template of defaultTemplates) {
+      this.templates.set(template.id, template);
     }
   }
 

@@ -2,7 +2,7 @@ import { apiFetch } from '@/lib/apiClient';
 import { PlatformMetric } from './platformMetrics';
 
 export interface DatabaseConfig {
-  type: 'sqlite' | 'postgresql' | 'mysql' | 'mongodb' | 'redis' | 'indexeddb' | 'localStorage' | 'memory';
+  type: 'sqlite' | 'postgresql' | 'mysql' | 'mongodb' | 'redis';
   name?: string;
   version?: number;
 }

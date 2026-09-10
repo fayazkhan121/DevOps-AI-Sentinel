@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { encryptString, decryptString, encryptJson, decryptJson, ipv4InCidr, sha256 } from '../server/crypto.ts';
 import { detectValueAnomalies, evaluateCondition, clusterLogs, zScore } from '../server/anomaly.ts';
-import { normalizeIntegrationConfig } from '../server/collectors.ts';
+import { normalizeIntegrationConfig, parseK8sCpuCores, parseK8sMemoryBytes } from '../server/collectors.ts';
 import { totpCode, verifyTotp, generateTotpSecret } from '../server/totp.ts';
 
 test('AES-256-GCM round trip', () => {
@@ -62,6 +62,27 @@ test('normalizes AWS and Jenkins integration form fields', () => {
   const jenkins = normalizeIntegrationConfig('jenkins', { token: 'abc', url: 'http://jenkins' });
   assert.equal(jenkins.apiToken, 'abc');
   assert.equal(jenkins.token, 'abc');
+});
+
+test('parses Kubernetes CPU quantities into cores', () => {
+  assert.equal(parseK8sCpuCores('250m'), 0.25);
+  assert.equal(parseK8sCpuCores('1'), 1);
+  assert.equal(parseK8sCpuCores('2.5'), 2.5);
+  assert.equal(parseK8sCpuCores('1000000000n'), 1);
+  assert.equal(parseK8sCpuCores('5000000ns'), 0.005);
+  assert.equal(parseK8sCpuCores('1000u'), 0.001);
+  assert.equal(parseK8sCpuCores(''), 0);
+  assert.equal(parseK8sCpuCores('not-a-quantity'), 0);
+});
+
+test('parses Kubernetes memory quantities into bytes', () => {
+  assert.equal(parseK8sMemoryBytes('1024Ki'), 1048576);
+  assert.equal(parseK8sMemoryBytes('1Mi'), 1048576);
+  assert.equal(parseK8sMemoryBytes('1Gi'), 1073741824);
+  assert.equal(parseK8sMemoryBytes('2Gi'), 2147483648);
+  assert.equal(parseK8sMemoryBytes('512'), 512);
+  assert.equal(parseK8sMemoryBytes(''), 0);
+  assert.equal(parseK8sMemoryBytes('12MiB'), 0);
 });
 
 test('TOTP generate and verify', () => {

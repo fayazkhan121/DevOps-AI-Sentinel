@@ -32,6 +32,35 @@ function pickStr(cfg: Record<string, unknown>, ...keys: string[]): string {
   return '';
 }
 
+/** Parses metrics.k8s.io CPU quantities (n/ns, u, m, or cores) into cores. */
+export function parseK8sCpuCores(quantity: string): number {
+  const raw = String(quantity || '').trim();
+  const match = raw.match(/^([0-9]*\.?[0-9]+)(ns|n|u|m)?$/);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return 0;
+  const suffix = match[2] || '';
+  const multipliers: Record<string, number> = { ns: 1e-9, n: 1e-9, u: 1e-6, m: 1e-3 };
+  return value * (multipliers[suffix] ?? 1);
+}
+
+/** Parses metrics.k8s.io memory quantities (Ki/Mi/Gi/Ti or bytes) into bytes. */
+export function parseK8sMemoryBytes(quantity: string): number {
+  const raw = String(quantity || '').trim();
+  const match = raw.match(/^([0-9]*\.?[0-9]+)(Ki|Mi|Gi|Ti)?$/);
+  if (!match) return 0;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return 0;
+  const suffix = match[2] || '';
+  const multipliers: Record<string, number> = {
+    Ki: 1024,
+    Mi: 1024 ** 2,
+    Gi: 1024 ** 3,
+    Ti: 1024 ** 4,
+  };
+  return value * (multipliers[suffix] ?? 1);
+}
+
 /** Maps UI/form field names onto the keys collectors expect. */
 export function normalizeIntegrationConfig(type: string, raw: Record<string, unknown> | null | undefined): Record<string, string> {
   const src = (raw || {}) as Record<string, unknown>;
@@ -262,8 +291,8 @@ async function collectAzure(cfg: Record<string, string>): Promise<CollectedMetri
     `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Compute/virtualMachines?api-version=2023-03-01`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
-  const value = (vms.data as { value?: unknown[] })?.value || [];
-  return [
+  const value = (vms.data as { value?: Array<{ id?: string }> })?.value || [];
+  const metrics: CollectedMetric[] = [
     {
       name: 'azure_vm_count',
       value: value.length,
@@ -274,6 +303,35 @@ async function collectAzure(cfg: Record<string, string>): Promise<CollectedMetri
       timestamp: nowIso(),
     },
   ];
+  try {
+    const toCheck = value.filter((vm) => vm.id).slice(0, 20);
+    const views = await Promise.all(
+      toCheck.map((vm) =>
+        fetchJson(`https://management.azure.com${vm.id}/instanceView?api-version=2023-03-01`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      )
+    );
+    const running = views.filter((view) => {
+      if (!view.ok) return false;
+      const statuses = (view.data as { statuses?: Array<{ code?: string }> })?.statuses || [];
+      return statuses.some((status) => (status.code || '').includes('PowerState/running'));
+    }).length;
+    if (toCheck.length === 0 || views.some((view) => view.ok)) {
+      metrics.push({
+        name: 'azure_vm_running',
+        value: running,
+        unit: 'count',
+        source: 'azure',
+        category: 'availability',
+        tags: { subscriptionId },
+        timestamp: nowIso(),
+      });
+    }
+  } catch {
+    // Skip azure_vm_running when instance views cannot be fetched.
+  }
+  return metrics;
 }
 
 async function collectGcp(cfg: Record<string, string>): Promise<CollectedMetric[]> {
@@ -285,15 +343,25 @@ async function collectGcp(cfg: Record<string, string>): Promise<CollectedMetric[
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   if (!res.ok) throw new Error('GCP compute query failed');
-  const items = (res.data as { items?: Record<string, { instances?: unknown[] }> })?.items || {};
-  const count = Object.values(items).reduce((sum, zone) => sum + (zone.instances?.length || 0), 0);
+  const items = (res.data as { items?: Record<string, { instances?: Array<{ status?: string }> }> })?.items || {};
+  const instances = Object.values(items).flatMap((zone) => zone.instances || []);
+  const running = instances.filter((instance) => instance.status === 'RUNNING').length;
   return [
     {
       name: 'gcp_instance_count',
-      value: count,
+      value: instances.length,
       unit: 'count',
       source: 'gcp',
       category: 'inventory',
+      tags: { projectId },
+      timestamp: nowIso(),
+    },
+    {
+      name: 'gcp_instance_running',
+      value: running,
+      unit: 'count',
+      source: 'gcp',
+      category: 'availability',
       tags: { projectId },
       timestamp: nowIso(),
     },
@@ -321,16 +389,30 @@ async function collectKubernetes(cfg: Record<string, string>): Promise<Collected
   const ns = await fetchJson(`${apiServer.replace(/\/$/, '')}/api/v1/namespaces`, { headers });
   const nsCount = ((ns.data as { items?: unknown[] })?.items || []).length;
   const nodeMetrics = await fetchJson(`${apiServer.replace(/\/$/, '')}/apis/metrics.k8s.io/v1beta1/nodes`, { headers });
-  const nodeMetricItems = ((nodeMetrics.data as { items?: unknown[] })?.items || []).length;
-  return [
+  const nodeMetricList =
+    ((nodeMetrics.data as { items?: Array<{ usage?: { cpu?: string; memory?: string } }> })?.items || []);
+  const collected: CollectedMetric[] = [
     { name: 'k8s_pod_count', value: podItems.length, unit: 'count', source: 'kubernetes', category: 'inventory', tags: {}, timestamp: nowIso() },
     { name: 'k8s_pod_running', value: running, unit: 'count', source: 'kubernetes', category: 'availability', tags: {}, timestamp: nowIso() },
     { name: 'k8s_pod_failed', value: failed, unit: 'count', source: 'kubernetes', category: 'quality', tags: {}, timestamp: nowIso() },
     { name: 'k8s_container_restarts', value: restarts, unit: 'count', source: 'kubernetes', category: 'quality', tags: {}, timestamp: nowIso() },
     { name: 'k8s_node_count', value: nodeItems.length, unit: 'count', source: 'kubernetes', category: 'inventory', tags: {}, timestamp: nowIso() },
     { name: 'k8s_namespace_count', value: nsCount, unit: 'count', source: 'kubernetes', category: 'inventory', tags: {}, timestamp: nowIso() },
-    { name: 'k8s_metrics_nodes', value: nodeMetricItems, unit: 'count', source: 'kubernetes', category: 'performance', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_metrics_nodes', value: nodeMetricList.length, unit: 'count', source: 'kubernetes', category: 'performance', tags: {}, timestamp: nowIso() },
   ];
+  if (nodeMetrics.ok) {
+    let cpuCores = 0;
+    let memoryBytes = 0;
+    for (const item of nodeMetricList) {
+      if (item.usage?.cpu) cpuCores += parseK8sCpuCores(item.usage.cpu);
+      if (item.usage?.memory) memoryBytes += parseK8sMemoryBytes(item.usage.memory);
+    }
+    collected.push(
+      { name: 'k8s_node_cpu_cores', value: Number(cpuCores.toFixed(6)), unit: 'cores', source: 'kubernetes', category: 'performance', tags: {}, timestamp: nowIso() },
+      { name: 'k8s_node_memory_bytes', value: Math.round(memoryBytes), unit: 'bytes', source: 'kubernetes', category: 'performance', tags: {}, timestamp: nowIso() },
+    );
+  }
+  return collected;
 }
 
 async function collectDocker(cfg: Record<string, string>): Promise<CollectedMetric[]> {
@@ -424,9 +506,53 @@ async function collectPrometheus(cfg: Record<string, string>): Promise<Collected
   return metrics;
 }
 
-async function collectAwsExtra(cw: { send: (cmd: unknown) => Promise<{ Metrics?: unknown[] }> }, region: string): Promise<CollectedMetric[]> {
+type CwDimension = { Name?: string; Value?: string };
+type CwListedMetric = { Dimensions?: CwDimension[] };
+type CwDatapoint = { Average?: number; Sum?: number; Timestamp?: Date };
+type CwClient = {
+  send: (cmd: unknown) => Promise<{ Metrics?: CwListedMetric[]; Datapoints?: CwDatapoint[] }>;
+};
+
+function firstCwDimension(metrics: CwListedMetric[], name: string): { Name: string; Value: string } | undefined {
+  for (const metric of metrics) {
+    const dim = metric.Dimensions?.find((d) => d.Name === name && d.Value);
+    if (dim?.Name && dim.Value) return { Name: dim.Name, Value: dim.Value };
+  }
+  return undefined;
+}
+
+function s3BucketDimensions(metrics: CwListedMetric[]): Array<{ Name: string; Value: string }> | undefined {
+  let chosen: CwListedMetric | undefined;
+  for (const metric of metrics) {
+    const bucket = metric.Dimensions?.find((d) => d.Name === 'BucketName' && d.Value);
+    if (!bucket) continue;
+    const standard = metric.Dimensions?.find((d) => d.Name === 'StorageType' && d.Value === 'StandardStorage');
+    if (standard) {
+      chosen = metric;
+      break;
+    }
+    if (!chosen) chosen = metric;
+  }
+  if (!chosen) return undefined;
+  const dims: Array<{ Name: string; Value: string }> = [];
+  for (const name of ['BucketName', 'StorageType'] as const) {
+    const dim = chosen.Dimensions?.find((d) => d.Name === name && d.Value);
+    if (dim?.Name && dim.Value) dims.push({ Name: dim.Name, Value: dim.Value });
+  }
+  return dims.length ? dims : undefined;
+}
+
+function latestCwValue(datapoints: CwDatapoint[] | undefined, statistic: 'Average' | 'Sum'): number | undefined {
+  const datapoint = (datapoints || [])
+    .slice()
+    .sort((a, b) => (b.Timestamp?.getTime() || 0) - (a.Timestamp?.getTime() || 0))[0];
+  const value = statistic === 'Sum' ? datapoint?.Sum : datapoint?.Average;
+  return value !== undefined ? Number(value) : undefined;
+}
+
+async function collectAwsExtra(cw: CwClient, region: string): Promise<CollectedMetric[]> {
   try {
-    const { ListMetricsCommand } = await import('@aws-sdk/client-cloudwatch');
+    const { ListMetricsCommand, GetMetricStatisticsCommand } = await import('@aws-sdk/client-cloudwatch');
     const namespaces = [
       { ns: 'AWS/RDS', name: 'aws_rds_metric_streams' },
       { ns: 'AWS/S3', name: 'aws_s3_metric_streams' },
@@ -434,8 +560,10 @@ async function collectAwsExtra(cw: { send: (cmd: unknown) => Promise<{ Metrics?:
       { ns: 'AWS/Lambda', name: 'aws_lambda_metric_streams' },
     ];
     const extra: CollectedMetric[] = [];
+    const listedByNs: Record<string, CwListedMetric[]> = {};
     for (const item of namespaces) {
       const listed = await cw.send(new ListMetricsCommand({ Namespace: item.ns }));
+      listedByNs[item.ns] = listed.Metrics || [];
       extra.push({
         name: item.name,
         value: listed.Metrics?.length || 0,
@@ -446,6 +574,99 @@ async function collectAwsExtra(cw: { send: (cmd: unknown) => Promise<{ Metrics?:
         timestamp: nowIso(),
       });
     }
+
+    const fiveMin = { startOffsetMs: 5 * 60 * 1000, period: 300 };
+    const twoDays = { startOffsetMs: 2 * 24 * 60 * 60 * 1000, period: 86400 };
+
+    const statisticFor = async (
+      namespace: string,
+      metricName: string,
+      statistic: 'Average' | 'Sum',
+      dimensions: Array<{ Name: string; Value: string }>,
+      window: { startOffsetMs: number; period: number } = fiveMin
+    ): Promise<number | undefined> => {
+      try {
+        const end = new Date();
+        const start = new Date(end.getTime() - window.startOffsetMs);
+        const result = await cw.send(new GetMetricStatisticsCommand({
+          Namespace: namespace,
+          MetricName: metricName,
+          Dimensions: dimensions,
+          StartTime: start,
+          EndTime: end,
+          Period: window.period,
+          Statistics: [statistic],
+        }));
+        return latestCwValue(result.Datapoints, statistic);
+      } catch {
+        return undefined;
+      }
+    };
+
+    const rdsId = firstCwDimension(listedByNs['AWS/RDS'] || [], 'DBInstanceIdentifier');
+    if (rdsId) {
+      const value = await statisticFor('AWS/RDS', 'CPUUtilization', 'Average', [rdsId]);
+      if (value !== undefined) {
+        extra.push({
+          name: 'aws_rds_cpu_usage',
+          value: Number(value.toFixed(2)),
+          unit: '%',
+          source: 'aws',
+          category: 'performance',
+          tags: { region, dbInstance: rdsId.Value },
+          timestamp: nowIso(),
+        });
+      }
+    }
+
+    const lambdaName = firstCwDimension(listedByNs['AWS/Lambda'] || [], 'FunctionName');
+    if (lambdaName) {
+      const value = await statisticFor('AWS/Lambda', 'Invocations', 'Sum', [lambdaName]);
+      if (value !== undefined) {
+        extra.push({
+          name: 'aws_lambda_invocations',
+          value: Number(value),
+          unit: 'count',
+          source: 'aws',
+          category: 'performance',
+          tags: { region, function: lambdaName.Value },
+          timestamp: nowIso(),
+        });
+      }
+    }
+
+    const alb = firstCwDimension(listedByNs['AWS/ApplicationELB'] || [], 'LoadBalancer');
+    if (alb) {
+      const value = await statisticFor('AWS/ApplicationELB', 'RequestCount', 'Sum', [alb]);
+      if (value !== undefined) {
+        extra.push({
+          name: 'aws_alb_request_count',
+          value: Number(value),
+          unit: 'count',
+          source: 'aws',
+          category: 'performance',
+          tags: { region, loadBalancer: alb.Value },
+          timestamp: nowIso(),
+        });
+      }
+    }
+
+    const s3Dims = s3BucketDimensions(listedByNs['AWS/S3'] || []);
+    if (s3Dims) {
+      const value = await statisticFor('AWS/S3', 'BucketSizeBytes', 'Average', s3Dims, twoDays);
+      if (value !== undefined) {
+        extra.push({
+          name: 'aws_s3_bucket_bytes',
+          value: Number(value),
+          unit: 'bytes',
+          source: 'aws',
+          category: 'performance',
+          tags: { region, bucket: s3Dims.find((d) => d.Name === 'BucketName')?.Value || '' },
+          timestamp: nowIso(),
+        });
+      }
+    }
+
     return extra;
   } catch {
     return [];

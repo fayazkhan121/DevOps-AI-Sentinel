@@ -3,7 +3,7 @@ import { apiFetch } from '@/lib/apiClient';
 export interface DatabaseConnection {
   id: string;
   name: string;
-  type: 'sqlite' | 'postgresql' | 'mysql' | 'mongodb' | 'redis' | 'indexeddb' | 'localStorage';
+  type: 'sqlite' | 'postgresql' | 'mysql' | 'mongodb' | 'redis';
   host?: string;
   port?: number;
   database?: string;
@@ -37,34 +37,25 @@ const DB_INTEGRATION_TYPES = new Set(['postgresql', 'mysql', 'mongodb', 'redis',
 
 export class DatabaseManager {
   private connections: Map<string, DatabaseConnection> = new Map();
-  private defaultConnection: string = 'local';
+  private defaultConnection: string = '';
 
-  constructor() {
-    this.initializeDefaultConnections();
-  }
-
-  private initializeDefaultConnections() {
-    this.connections.set('local', {
-      id: 'local',
-      name: 'Local Storage',
-      type: 'localStorage',
-      isActive: true,
-      lastConnected: new Date().toISOString(),
-    });
-    this.connections.set('indexeddb', {
-      id: 'indexeddb',
-      name: 'IndexedDB',
-      type: 'indexeddb',
-      isActive: true,
-      lastConnected: new Date().toISOString(),
-    });
+  private pickDefaultConnection(): string {
+    const stored = localStorage.getItem('default_database_connection');
+    if (stored && stored !== 'local' && stored !== 'indexeddb' && this.connections.has(stored)) {
+      this.defaultConnection = stored;
+      return stored;
+    }
+    const first = this.connections.values().next().value as DatabaseConnection | undefined;
+    this.defaultConnection = first?.id || '';
+    return this.defaultConnection;
   }
 
   private async refreshFromApi(): Promise<void> {
     const data = await apiFetch<{ integrations: Array<{ id: string; type: string; name: string; status: string; error?: string; last_sync?: string }> }>('/integrations');
+    const next = new Map<string, DatabaseConnection>();
     for (const row of data.integrations || []) {
       if (!DB_INTEGRATION_TYPES.has(row.type)) continue;
-      this.connections.set(row.id, {
+      next.set(row.id, {
         id: row.id,
         name: row.name,
         type: row.type as DatabaseConnection['type'],
@@ -73,6 +64,8 @@ export class DatabaseManager {
         lastConnected: row.last_sync,
       });
     }
+    this.connections = next;
+    this.pickDefaultConnection();
   }
 
   async addConnection(connection: DatabaseConnection): Promise<boolean> {
@@ -110,9 +103,6 @@ export class DatabaseManager {
 
   async removeConnection(connectionId: string): Promise<boolean> {
     try {
-      if (connectionId === 'local' || connectionId === 'indexeddb') {
-        return false;
-      }
       await apiFetch(`/integrations/${connectionId}`, { method: 'DELETE' });
       this.connections.delete(connectionId);
       return true;
@@ -124,14 +114,11 @@ export class DatabaseManager {
 
   async testConnection(connection: DatabaseConnection): Promise<DatabaseResult> {
     const started = Date.now();
-    const type = connection.type === 'indexeddb' || connection.type === 'localStorage'
-      ? 'sqlite'
-      : connection.type;
     try {
       const result = await apiFetch<{ success: boolean; message: string; latencyMs: number }>('/databases/test', {
         method: 'POST',
         body: JSON.stringify({
-          type,
+          type: connection.type,
           host: connection.host,
           port: String(connection.port || ''),
           username: connection.username,
@@ -172,13 +159,13 @@ export class DatabaseManager {
     try {
       await this.refreshFromApi();
     } catch {
-      // Keep built-in local connections if the API is unreachable.
+      this.pickDefaultConnection();
     }
     return Array.from(this.connections.values());
   }
 
   async setDefaultConnection(connectionId: string): Promise<boolean> {
-    if (this.connections.has(connectionId) || connectionId === 'local' || connectionId === 'indexeddb') {
+    if (this.connections.has(connectionId)) {
       this.defaultConnection = connectionId;
       localStorage.setItem('default_database_connection', connectionId);
       return true;
@@ -187,7 +174,7 @@ export class DatabaseManager {
   }
 
   getDefaultConnection(): string {
-    return localStorage.getItem('default_database_connection') || this.defaultConnection;
+    return this.pickDefaultConnection();
   }
 
   async migrateData(_sourceConnectionId: string, _targetConnectionId: string): Promise<DatabaseResult> {

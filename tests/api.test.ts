@@ -148,14 +148,14 @@ test('integrations persist many of the same type, notification channels, and sql
   const prom = (listed.body.integrations || []).filter((row: { type: string }) => row.type === 'prometheus');
   assert.equal(prom.length, 2);
 
-  const updated = await json('/api/integrations', {
+  const updatedInt = await json('/api/integrations', {
     method: 'POST',
     headers,
     body: JSON.stringify({ id, type: 'prometheus', name: 'Prom-updated', config: { url: 'http://127.0.0.1:9092' } }),
   });
-  assert.equal(updated.status, 200, JSON.stringify(updated.body));
-  assert.equal(updated.body.id, id);
-  assert.equal(updated.body.updated, true);
+  assert.equal(updatedInt.status, 200, JSON.stringify(updatedInt.body));
+  assert.equal(updatedInt.body.id, id);
+  assert.equal(updatedInt.body.updated, true);
 
   const aws = await json('/api/integrations', {
     method: 'POST',

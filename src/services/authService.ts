@@ -141,6 +141,27 @@ export class AuthService {
     }
   }
 
+  async createOrg(payload: {
+    name: string;
+    adminUsername: string;
+    adminPassword: string;
+    adminEmail?: string;
+    collectHostMetrics?: boolean;
+  }): Promise<{ success: boolean; orgId?: string; message?: string }> {
+    const data = await apiFetch<{ success: boolean; orgId?: string; message?: string }>('/orgs', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: payload.name,
+        adminUsername: payload.adminUsername,
+        adminPassword: payload.adminPassword,
+        ...(payload.adminEmail ? { adminEmail: payload.adminEmail } : {}),
+        collectHostMetrics: payload.collectHostMetrics === true,
+      }),
+    });
+    // Do not persist/applySsoToken: the response token belongs to the new org admin.
+    return { success: data.success !== false, orgId: data.orgId, message: data.message };
+  }
+
   async acceptInvite(payload: { token: string; username: string; password: string; fullName?: string }): Promise<{ success: boolean; id?: string; message?: string }> {
     try {
       return await apiFetch<{ success: boolean; id?: string; message?: string }>('/auth/accept-invite', {

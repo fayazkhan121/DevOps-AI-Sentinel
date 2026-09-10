@@ -44,11 +44,20 @@ const UserManagement: React.FC = () => {
   const [error, setError] = useState<string>('');
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showInviteDialog, setShowInviteDialog] = useState(false);
+  const [showCreateOrgDialog, setShowCreateOrgDialog] = useState(false);
   const [inviteForm, setInviteForm] = useState<{ email: string; role: 'admin' | 'user' | 'viewer' }>({
     email: '',
     role: 'user',
   });
   const [inviteResult, setInviteResult] = useState<{ token?: string; message?: string } | null>(null);
+  const [orgForm, setOrgForm] = useState({
+    name: '',
+    adminUsername: '',
+    adminEmail: '',
+    adminPassword: '',
+  });
+  const [createdOrgId, setCreatedOrgId] = useState<string | null>(null);
+  const isAdmin = authService.getCurrentUser()?.role === 'admin';
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [userFormData, setUserFormData] = useState<UserFormData>({
     username: '',
@@ -124,6 +133,43 @@ const UserManagement: React.FC = () => {
     } catch (error) {
       console.error('Failed to invite user:', error);
       setError(error instanceof Error ? error.message : 'Failed to invite user');
+    }
+  };
+
+  const resetOrgForm = () => {
+    setOrgForm({ name: '', adminUsername: '', adminEmail: '', adminPassword: '' });
+    setCreatedOrgId(null);
+  };
+
+  const handleCreateOrg = async () => {
+    try {
+      if (!orgForm.name || !orgForm.adminUsername || !orgForm.adminPassword) {
+        setError('Organization name, admin username, and admin password are required');
+        return;
+      }
+      if (orgForm.adminPassword.length < 8) {
+        setError('Admin password must be at least 8 characters');
+        return;
+      }
+
+      const data = await authService.createOrg({
+        name: orgForm.name,
+        adminUsername: orgForm.adminUsername,
+        adminPassword: orgForm.adminPassword,
+        adminEmail: orgForm.adminEmail.trim() || undefined,
+        collectHostMetrics: false,
+      });
+
+      if (!data.orgId) {
+        setError(data.message || 'Failed to create organization');
+        return;
+      }
+
+      setError('');
+      setCreatedOrgId(data.orgId);
+    } catch (error) {
+      console.error('Failed to create organization:', error);
+      setError(error instanceof Error ? error.message : 'Failed to create organization');
     }
   };
 
@@ -262,6 +308,93 @@ const UserManagement: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center space-x-2">
+        {isAdmin && (
+        <Dialog
+          open={showCreateOrgDialog}
+          onOpenChange={(open) => {
+            setShowCreateOrgDialog(open);
+            if (!open) resetOrgForm();
+          }}
+        >
+          <DialogTrigger asChild>
+            <Button variant="outline">Create organization</Button>
+          </DialogTrigger>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Create organization</DialogTitle>
+              <DialogDescription>
+                Provision a new organization with its own admin account.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div>
+                <Label htmlFor="org-name">Organization name</Label>
+                <Input
+                  id="org-name"
+                  value={orgForm.name}
+                  onChange={(e) => setOrgForm(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="Enter organization name"
+                  disabled={Boolean(createdOrgId)}
+                />
+              </div>
+              <div>
+                <Label htmlFor="org-admin-username">Admin username</Label>
+                <Input
+                  id="org-admin-username"
+                  value={orgForm.adminUsername}
+                  onChange={(e) => setOrgForm(prev => ({ ...prev, adminUsername: e.target.value }))}
+                  placeholder="Enter admin username"
+                  disabled={Boolean(createdOrgId)}
+                />
+              </div>
+              <div>
+                <Label htmlFor="org-admin-email">Admin email (optional)</Label>
+                <Input
+                  id="org-admin-email"
+                  type="email"
+                  value={orgForm.adminEmail}
+                  onChange={(e) => setOrgForm(prev => ({ ...prev, adminEmail: e.target.value }))}
+                  placeholder="Enter admin email"
+                  disabled={Boolean(createdOrgId)}
+                />
+              </div>
+              <div>
+                <Label htmlFor="org-admin-password">Admin password</Label>
+                <Input
+                  id="org-admin-password"
+                  type="password"
+                  value={orgForm.adminPassword}
+                  onChange={(e) => setOrgForm(prev => ({ ...prev, adminPassword: e.target.value }))}
+                  placeholder="At least 8 characters"
+                  disabled={Boolean(createdOrgId)}
+                />
+              </div>
+              {createdOrgId && (
+                <div>
+                  <Label htmlFor="created-org-id">Organization ID</Label>
+                  <Input id="created-org-id" value={createdOrgId} readOnly />
+                </div>
+              )}
+              <div className="flex space-x-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setShowCreateOrgDialog(false);
+                    resetOrgForm();
+                  }}
+                >
+                  {createdOrgId ? 'Close' : 'Cancel'}
+                </Button>
+                {!createdOrgId && (
+                  <Button onClick={handleCreateOrg}>
+                    Create organization
+                  </Button>
+                )}
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+        )}
         <Dialog
           open={showInviteDialog}
           onOpenChange={(open) => {

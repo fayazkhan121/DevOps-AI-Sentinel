@@ -34,7 +34,7 @@ import { advancedAlerting } from '@/services/advancedAlerting';
 import { apiFetch } from '@/lib/apiClient';
 
 interface DatabaseConfig {
-  type: 'sqlite' | 'postgresql' | 'mysql' | 'mongodb' | 'redis' | 'indexeddb';
+  type: 'sqlite' | 'postgresql' | 'mysql' | 'mongodb' | 'redis';
   host?: string;
   port?: number;
   username?: string;
@@ -65,7 +65,7 @@ interface CloudCredentials {
 export const AdvancedSettingsPanel: React.FC = () => {
   const [activeTab, setActiveTab] = useState('database');
   const [databaseConfig, setDatabaseConfig] = useState<DatabaseConfig>({
-    type: 'indexeddb'
+    type: 'sqlite'
   });
   const [cloudCredentials, setCloudCredentials] = useState<CloudCredentials>({});
   const [devopsConfig, setDevopsConfig] = useState({
@@ -202,7 +202,7 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const saveDatabaseConfig = async () => {
     try {
       setIsLoading(true);
-      const type = databaseConfig.type === 'indexeddb' ? 'sqlite' : databaseConfig.type;
+      const type = databaseConfig.type;
       await apiFetch('/integrations', {
         method: 'POST',
         body: JSON.stringify({
@@ -365,7 +365,6 @@ export const AdvancedSettingsPanel: React.FC = () => {
                       <SelectValue placeholder="Select database type" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="indexeddb">IndexedDB (Local)</SelectItem>
                       <SelectItem value="sqlite">SQLite</SelectItem>
                       <SelectItem value="postgresql">PostgreSQL</SelectItem>
                       <SelectItem value="mysql">MySQL</SelectItem>
@@ -383,8 +382,7 @@ export const AdvancedSettingsPanel: React.FC = () => {
                 </div>
               </div>
 
-              {databaseConfig.type !== 'indexeddb' && (
-                <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="db-host">Host</Label>
                     <Input
@@ -444,7 +442,6 @@ export const AdvancedSettingsPanel: React.FC = () => {
                     </div>
                   </div>
                 </div>
-              )}
 
               <div className="flex justify-end">
                 <Button onClick={saveDatabaseConfig} disabled={isLoading}>

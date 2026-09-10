@@ -11,17 +11,19 @@ DevOps AI Sentinel is a React UI plus an Express API in `server/`.
 
 - The API owns authentication, metric collection, alert evaluation, and notification delivery.
 - Application database: SQLite by default; PostgreSQL when `DATABASE_TYPE=postgres` (`pg.Pool`). The setup wizard does not pick the app DB — set it in the environment (`env.example`).
-- The UI talks to `/api` and Socket.IO. It does not store passwords or cloud secrets in the browser.
-- Host CPU/memory/disk/network metrics come from the API process (optional remote ingest via `agent/collect.mjs`). Cloud collectors run only when credentials are saved.
+- The UI talks to `/api` and Socket.IO. It does not store passwords or cloud secrets in the browser. There is no IndexedDB/localStorage fake application database.
+- Host CPU/memory/disk/network metrics come from the API process (optional remote ingest via `agent/collect.mjs`, including `agent_cpu_usage`). Cloud collectors run only when credentials are saved.
 - The web UI is a PWA (`public/manifest.json`). There are no iOS or Android binaries.
 
 ## Key Features
 
 ### Multi-cloud and host metrics
-- AWS (when access keys are set): EC2 inventory, CloudWatch CPU, Cost Explorer, CloudWatch `ListMetrics` counts
-- Azure: VM count via ARM when a service principal is configured
-- GCP: instance count when a project access token is configured
+- AWS (when access keys are set): EC2 inventory, CloudWatch CPU, Cost Explorer, CloudWatch utilization for RDS/Lambda/ALB/S3 when datapoints exist
+- Azure: running VM count via ARM when a service principal is configured
+- GCP: running instance count when a project access token is configured
+- Kubernetes (when configured): pod/node inventory plus node CPU/memory from metrics-server
 - Host metrics from the API process: CPU, memory, disk, network, load, uptime
+- Remote agent ingest: `agent_cpu_usage` and related host samples from `agent/collect.mjs`
 - Retention: 90 days by default (`METRICS_RETENTION_DAYS`, clamped 7–365)
 
 ### DevOps tools
@@ -34,12 +36,15 @@ Threshold rules on collected metrics. Delivery when configured: SMTP, Slack, Dis
 - bcrypt password hashes, signed JWT sessions, RBAC
 - Optional IP allowlist, TOTP, GitHub OAuth, OIDC
 - SAML ACS is NameID-only and is **not** XML-DSig verified — use OIDC instead
-- First organization: `POST /api/setup`. Additional organizations: authenticated admin `POST /api/orgs`
+- First organization: `POST /api/setup`. Additional organizations: authenticated admin `POST /api/orgs` (User Management create-organization dialog)
 - Settings primary key `(org_id, key)`. Usernames unique per org
 - Invite and password-reset tokens are stored hashed; email is sent when SMTP is configured
 
 ### Backups
-Org-scoped JSON snapshots via `/api/backups`. This is not a per-tenant filesystem snapshot of SQLite/Postgres.
+Org-scoped JSON snapshots via `/api/backups`. This is not a per-tenant filesystem snapshot of SQLite/Postgres and not a physical Postgres dump.
+
+### CI
+GitHub Actions runs unit/API tests and a PostgreSQL job (`npm run test:postgres`).
 
 ## Architecture
 
@@ -93,6 +98,8 @@ npm run build
 npm run lint
 ```
 
+PostgreSQL path (matches CI): set `DATABASE_TYPE=postgres` and run `npm run test:postgres`.
+
 ## Deployment
 
 ### Docker
@@ -134,7 +141,15 @@ NODE_ENV=production PORT=3000 npm start
 SENTINEL_URL=http://localhost:3000 AGENT_KEY=... node agent/collect.mjs
 ```
 
-Create a key with `POST /api/agents/keys` as an admin.
+Create a key with `POST /api/agents/keys` as an admin. Ingested samples include `agent_cpu_usage`.
+
+## Remaining (not in this product)
+
+- Native iOS/Android
+- XML-DSig SAML (use OIDC)
+- Vulnerability scanning / cost-optimization engines
+- HA, SCIM
+- Per-tenant physical Postgres dumps
 
 ## License
 

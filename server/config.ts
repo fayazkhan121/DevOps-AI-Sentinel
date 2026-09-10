@@ -36,6 +36,22 @@ export const config = {
     database: process.env.POSTGRES_DB || process.env.DATABASE_NAME || 'devops_sentinel',
     user: process.env.POSTGRES_USER || process.env.DATABASE_USER || 'postgres',
     password: process.env.POSTGRES_PASSWORD || process.env.DATABASE_PASSWORD || '',
+    ssl: process.env.POSTGRES_SSL === 'true',
+    sslRejectUnauthorized: process.env.POSTGRES_SSL_REJECT_UNAUTHORIZED !== 'false',
+  },
+  metricsRetentionDays: Math.min(365, Math.max(7, Number(process.env.METRICS_RETENTION_DAYS) || 90)),
+  oidc: {
+    issuer: process.env.OIDC_ISSUER || '',
+    clientId: process.env.OIDC_CLIENT_ID || '',
+    clientSecret: process.env.OIDC_CLIENT_SECRET || '',
+    redirectUrl: process.env.OIDC_REDIRECT_URL || '',
+    scope: process.env.OIDC_SCOPE || 'openid email profile',
+  },
+  saml: {
+    idpSsoUrl: process.env.SAML_IDP_SSO_URL || '',
+    idpCert: (process.env.SAML_IDP_CERT || '').replace(/\\n/g, '\n'),
+    entityId: process.env.SAML_ENTITY_ID || 'https://sentinel.local/saml',
+    acsUrl: process.env.SAML_ACS_URL || '',
   },
   rateLimit: {
     windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),

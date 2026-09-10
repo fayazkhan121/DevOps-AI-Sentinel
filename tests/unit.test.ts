@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { encryptString, decryptString, encryptJson, decryptJson, ipv4InCidr, sha256 } from '../server/crypto.ts';
 import { detectValueAnomalies, evaluateCondition, clusterLogs, zScore } from '../server/anomaly.ts';
 import { normalizeIntegrationConfig } from '../server/collectors.ts';
+import { totpCode, verifyTotp, generateTotpSecret } from '../server/totp.ts';
 
 test('AES-256-GCM round trip', () => {
   const secret = 'unit-test-encryption-key-32ch';
@@ -61,4 +62,12 @@ test('normalizes AWS and Jenkins integration form fields', () => {
   const jenkins = normalizeIntegrationConfig('jenkins', { token: 'abc', url: 'http://jenkins' });
   assert.equal(jenkins.apiToken, 'abc');
   assert.equal(jenkins.token, 'abc');
+});
+
+test('TOTP generate and verify', () => {
+  const secret = generateTotpSecret();
+  assert.ok(secret.length >= 16);
+  const code = totpCode(secret);
+  assert.equal(verifyTotp(secret, code), true);
+  assert.equal(verifyTotp(secret, '000000'), false);
 });

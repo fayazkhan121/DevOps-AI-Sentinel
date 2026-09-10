@@ -119,7 +119,7 @@ async function sendChannel(channel: ChannelRow, alert: Record<string, unknown>):
 
 export async function evaluateAlerts(orgId: string, metrics: CollectedMetric[]): Promise<string[]> {
   const db = getDb();
-  const rules = db.all<RuleRow>('SELECT * FROM alert_rules WHERE org_id = ? AND enabled = 1', [orgId]);
+  const rules = await db.all<RuleRow>('SELECT * FROM alert_rules WHERE org_id = ? AND enabled = 1', [orgId]);
   const triggered: string[] = [];
 
   for (const rule of rules) {
@@ -127,7 +127,7 @@ export async function evaluateAlerts(orgId: string, metrics: CollectedMetric[]):
     if (!metric) continue;
     if (!evaluateCondition(metric.value, rule.operator, rule.threshold)) continue;
 
-    const existing = db.get<{ id: string }>(
+    const existing = await db.get<{ id: string }>(
       `SELECT id FROM alerts WHERE org_id = ? AND rule_id = ? AND status IN ('active','acknowledged') ORDER BY timestamp DESC LIMIT 1`,
       [orgId, rule.id]
     );
@@ -135,7 +135,7 @@ export async function evaluateAlerts(orgId: string, metrics: CollectedMetric[]):
 
     const alertId = randomId('alert');
     const description = `${rule.name}: ${metric.name} is ${metric.value}${metric.unit} (threshold ${rule.operator} ${rule.threshold})`;
-    db.run(
+    await db.run(
       `INSERT INTO alerts (id, org_id, rule_id, name, description, severity, status, source, timestamp, metadata)
        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
       [
@@ -153,7 +153,7 @@ export async function evaluateAlerts(orgId: string, metrics: CollectedMetric[]):
     triggered.push(alertId);
 
     const actions = parseJson<{ channels?: string[] }>(rule.actions, {});
-    const channels = db.all<ChannelRow>('SELECT * FROM notification_channels WHERE org_id = ? AND is_enabled = 1', [orgId]);
+    const channels = await db.all<ChannelRow>('SELECT * FROM notification_channels WHERE org_id = ? AND is_enabled = 1', [orgId]);
     const selected = actions.channels?.length
       ? channels.filter((c) => actions.channels!.includes(c.id) || actions.channels!.includes(c.type))
       : channels.filter((c) => c.is_enabled);
@@ -166,7 +166,7 @@ export async function evaluateAlerts(orgId: string, metrics: CollectedMetric[]):
           severity: rule.severity,
         });
       } catch (error) {
-        db.run(
+        await db.run(
           'INSERT INTO audit_logs (id, org_id, user_id, action, description, details, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)',
           [randomId('log'), orgId, 'system', 'alert_delivery_failed', `Failed ${channel.type} delivery`, error instanceof Error ? error.message : 'error', nowIso()]
         );
@@ -179,7 +179,7 @@ export async function evaluateAlerts(orgId: string, metrics: CollectedMetric[]):
 
 export async function testChannel(channelId: string): Promise<void> {
   const db = getDb();
-  const channel = db.get<ChannelRow>('SELECT * FROM notification_channels WHERE id = ?', [channelId]);
+  const channel = await db.get<ChannelRow>('SELECT * FROM notification_channels WHERE id = ?', [channelId]);
   if (!channel) throw new Error('Channel not found');
   await sendChannel(channel, {
     name: 'Test alert',
@@ -188,9 +188,9 @@ export async function testChannel(channelId: string): Promise<void> {
   });
 }
 
-export function seedDefaultRules(orgId: string): void {
+export async function seedDefaultRules(orgId: string): Promise<void> {
   const db = getDb();
-  const existing = db.get<{ c: number }>('SELECT COUNT(*) as c FROM alert_rules WHERE org_id = ?', [orgId]);
+  const existing = await db.get<{ c: number }>('SELECT COUNT(*) as c FROM alert_rules WHERE org_id = ?', [orgId]);
   if ((existing?.c || 0) > 0) return;
   const defaults = [
     { metric: 'cpu_usage', name: 'High CPU Usage', threshold: config.thresholds.cpuCritical, severity: 'critical' },
@@ -198,7 +198,7 @@ export function seedDefaultRules(orgId: string): void {
     { metric: 'disk_usage', name: 'High Disk Usage', threshold: config.thresholds.diskCritical, severity: 'warning' },
   ];
   for (const rule of defaults) {
-    db.run(
+    await db.run(
       `INSERT INTO alert_rules (id, org_id, name, description, metric, operator, threshold, duration_seconds, severity, enabled, actions, created_at)
        VALUES (?, ?, ?, ?, ?, '>', ?, 300, ?, 1, '{}', ?)`,
       [randomId('rule'), orgId, rule.name, `${rule.name} threshold`, rule.metric, rule.threshold, rule.severity, nowIso()]

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { config } from './config.ts';
 import { decryptJson } from './crypto.ts';
 import { getDb, nowIso } from './db.ts';
+import { orgWantsHostMetrics } from './tenancy.ts';
 
 export interface CollectedMetric {
   name: string;
@@ -144,7 +145,7 @@ export function collectHostMetrics(): CollectedMetric[] {
   ];
 }
 
-function listIntegrations(orgId?: string): IntegrationRow[] {
+async function listIntegrations(orgId?: string): Promise<IntegrationRow[]> {
   const db = getDb();
   if (orgId) {
     return db.all<IntegrationRow>('SELECT * FROM integrations WHERE org_id = ?', [orgId]);
@@ -232,6 +233,7 @@ async function collectAws(cfg: Record<string, string>): Promise<CollectedMetric[
       }
     }
     metrics.push(...await collectAwsCost(cfg, creds, region));
+    metrics.push(...await collectAwsExtra(cw, region));
     return metrics;
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : 'AWS collection failed');
@@ -308,11 +310,26 @@ async function collectKubernetes(cfg: Record<string, string>): Promise<Collected
     fetchJson(`${apiServer.replace(/\/$/, '')}/api/v1/nodes`, { headers }),
   ]);
   if (!pods.ok) throw new Error('Kubernetes API request failed');
-  const podItems = (pods.data as { items?: unknown[] })?.items || [];
+  const podItems = (pods.data as { items?: Array<{ status?: { phase?: string; containerStatuses?: Array<{ restartCount?: number }> } }> })?.items || [];
   const nodeItems = (nodes.data as { items?: unknown[] })?.items || [];
+  const running = podItems.filter((p) => p.status?.phase === 'Running').length;
+  const failed = podItems.filter((p) => p.status?.phase === 'Failed' || p.status?.phase === 'CrashLoopBackOff').length;
+  const restarts = podItems.reduce(
+    (sum, pod) => sum + (pod.status?.containerStatuses || []).reduce((acc, c) => acc + (c.restartCount || 0), 0),
+    0
+  );
+  const ns = await fetchJson(`${apiServer.replace(/\/$/, '')}/api/v1/namespaces`, { headers });
+  const nsCount = ((ns.data as { items?: unknown[] })?.items || []).length;
+  const nodeMetrics = await fetchJson(`${apiServer.replace(/\/$/, '')}/apis/metrics.k8s.io/v1beta1/nodes`, { headers });
+  const nodeMetricItems = ((nodeMetrics.data as { items?: unknown[] })?.items || []).length;
   return [
     { name: 'k8s_pod_count', value: podItems.length, unit: 'count', source: 'kubernetes', category: 'inventory', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_pod_running', value: running, unit: 'count', source: 'kubernetes', category: 'availability', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_pod_failed', value: failed, unit: 'count', source: 'kubernetes', category: 'quality', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_container_restarts', value: restarts, unit: 'count', source: 'kubernetes', category: 'quality', tags: {}, timestamp: nowIso() },
     { name: 'k8s_node_count', value: nodeItems.length, unit: 'count', source: 'kubernetes', category: 'inventory', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_namespace_count', value: nsCount, unit: 'count', source: 'kubernetes', category: 'inventory', tags: {}, timestamp: nowIso() },
+    { name: 'k8s_metrics_nodes', value: nodeMetricItems, unit: 'count', source: 'kubernetes', category: 'performance', tags: {}, timestamp: nowIso() },
   ];
 }
 
@@ -379,14 +396,60 @@ async function collectGit(cfg: Record<string, string>): Promise<CollectedMetric[
 async function collectPrometheus(cfg: Record<string, string>): Promise<CollectedMetric[]> {
   const url = (cfg.url || cfg.prometheusUrl || '').replace(/\/$/, '');
   if (!url) return [];
-  const query = encodeURIComponent('up');
   const headers: Record<string, string> = {};
   if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
-  const res = await fetchJson(`${url}/api/v1/query?query=${query}`, { headers });
-  if (!res.ok) throw new Error('Prometheus query failed');
-  const result = (res.data as { data?: { result?: unknown[] } })?.data?.result || [];
-  const up = result.length;
-  return [{ name: 'prometheus_up_series', value: up, unit: 'count', source: 'prometheus', category: 'availability', tags: {}, timestamp: nowIso() }];
+  const queries = String(cfg.query || cfg.queries || 'up')
+    .split(',')
+    .map((q) => q.trim())
+    .filter(Boolean);
+  if (!queries.includes('up')) queries.unshift('up');
+  const metrics: CollectedMetric[] = [];
+  for (const query of queries.slice(0, 8)) {
+    const res = await fetchJson(`${url}/api/v1/query?query=${encodeURIComponent(query)}`, { headers });
+    if (!res.ok) throw new Error(`Prometheus query failed: ${query}`);
+    const result = (res.data as { data?: { result?: Array<{ value?: [number, string] }> } })?.data?.result || [];
+    const numeric = result.map((row) => Number(row.value?.[1] || 0)).filter((n) => Number.isFinite(n));
+    const value = query === 'up' ? result.length : numeric.reduce((sum, n) => sum + n, 0);
+    const name = query === 'up' ? 'prometheus_up_series' : `promql_${query.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 48)}`;
+    metrics.push({
+      name,
+      value: Number(value.toFixed(4)),
+      unit: query === 'up' ? 'count' : 'value',
+      source: 'prometheus',
+      category: 'availability',
+      tags: { query },
+      timestamp: nowIso(),
+    });
+  }
+  return metrics;
+}
+
+async function collectAwsExtra(cw: { send: (cmd: unknown) => Promise<{ Metrics?: unknown[] }> }, region: string): Promise<CollectedMetric[]> {
+  try {
+    const { ListMetricsCommand } = await import('@aws-sdk/client-cloudwatch');
+    const namespaces = [
+      { ns: 'AWS/RDS', name: 'aws_rds_metric_streams' },
+      { ns: 'AWS/S3', name: 'aws_s3_metric_streams' },
+      { ns: 'AWS/ApplicationELB', name: 'aws_alb_metric_streams' },
+      { ns: 'AWS/Lambda', name: 'aws_lambda_metric_streams' },
+    ];
+    const extra: CollectedMetric[] = [];
+    for (const item of namespaces) {
+      const listed = await cw.send(new ListMetricsCommand({ Namespace: item.ns }));
+      extra.push({
+        name: item.name,
+        value: listed.Metrics?.length || 0,
+        unit: 'count',
+        source: 'aws',
+        category: 'inventory',
+        tags: { region, namespace: item.ns },
+        timestamp: nowIso(),
+      });
+    }
+    return extra;
+  } catch {
+    return [];
+  }
 }
 
 async function collectAwsCost(cfg: Record<string, string>, creds: { accessKeyId: string; secretAccessKey: string }, region: string): Promise<CollectedMetric[]> {
@@ -507,7 +570,7 @@ export async function probeDatabase(cfg: Record<string, string>): Promise<{ ok: 
       await client.ping();
       await client.quit();
     } else if (type === 'sqlite' || type === 'indexeddb' || type === 'localstorage') {
-      getDb().get('SELECT 1 as ok');
+      await getDb().get('SELECT 1 as ok');
     } else {
       return { ok: false, message: `Unsupported database type ${type}`, latencyMs: Date.now() - started };
     }
@@ -550,8 +613,11 @@ const collectors: Record<string, (cfg: Record<string, string>) => Promise<Collec
 };
 
 export async function collectAllMetrics(orgId?: string): Promise<CollectedMetric[]> {
-  const metrics = collectHostMetrics();
-  const integrations = listIntegrations(orgId);
+  const metrics: CollectedMetric[] = [];
+  if (!orgId || await orgWantsHostMetrics(orgId)) {
+    metrics.push(...collectHostMetrics());
+  }
+  const integrations = await listIntegrations(orgId);
   const db = getDb();
 
   for (const integration of integrations) {
@@ -561,25 +627,26 @@ export async function collectAllMetrics(orgId?: string): Promise<CollectedMetric
     try {
       const extra = await fn(cfg);
       metrics.push(...extra);
-      db.run('UPDATE integrations SET status = ?, last_sync = ?, error = NULL WHERE id = ?', ['connected', nowIso(), integration.id]);
+      await db.run('UPDATE integrations SET status = ?, last_sync = ?, error = NULL WHERE id = ?', ['connected', nowIso(), integration.id]);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'collection failed';
-      db.run('UPDATE integrations SET status = ?, last_sync = ?, error = ? WHERE id = ?', ['error', nowIso(), message, integration.id]);
+      await db.run('UPDATE integrations SET status = ?, last_sync = ?, error = ? WHERE id = ?', ['error', nowIso(), message, integration.id]);
     }
   }
 
   return metrics;
 }
 
-export function persistMetrics(metrics: CollectedMetric[], orgId: string): void {
+export async function persistMetrics(metrics: CollectedMetric[], orgId: string): Promise<void> {
   const db = getDb();
+  const days = Math.min(Math.max(Number(config.metricsRetentionDays || 90), 7), 365);
   for (const metric of metrics) {
-    db.run(
+    await db.run(
       'INSERT INTO metrics (org_id, name, value, unit, source, category, tags, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [orgId, metric.name, metric.value, metric.unit, metric.source, metric.category, JSON.stringify(metric.tags), metric.timestamp]
     );
   }
-  db.run(`DELETE FROM metrics WHERE timestamp < ?`, [new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()]);
+  await db.run(`DELETE FROM metrics WHERE org_id = ? AND timestamp < ?`, [orgId, new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()]);
 }
 
 export function overviewFromMetrics(metrics: CollectedMetric[]): {

@@ -78,6 +78,11 @@ export const AdvancedSettingsPanel: React.FC = () => {
   const [connectionStatus, setConnectionStatus] = useState<{[key: string]: boolean}>({});
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [totpEnabled, setTotpEnabled] = useState(false);
+  const [totpSecret, setTotpSecret] = useState('');
+  const [totpUrl, setTotpUrl] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+  const [totpPassword, setTotpPassword] = useState('');
 
   useEffect(() => {
     loadCurrentConfig();
@@ -102,6 +107,8 @@ export const AdvancedSettingsPanel: React.FC = () => {
         enabled: ch.enabled ?? ch.isEnabled ?? true,
         config: ch.config || {},
       })));
+      const me = await apiFetch<{ user?: { totpEnabled?: boolean } }>('/auth/me').catch(() => ({ user: undefined }));
+      setTotpEnabled(Boolean(me.user?.totpEnabled));
     } catch (error) {
       console.error('Failed to load configuration:', error);
     }
@@ -937,79 +944,69 @@ export const AdvancedSettingsPanel: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-lg font-semibold">Two-Factor Authentication</h3>
-                    <p className="text-sm text-muted-foreground">Enable 2FA for enhanced security</p>
+                    <p className="text-sm text-muted-foreground">TOTP authenticator app required at login</p>
                   </div>
-                  <Switch />
+                  <Switch
+                    checked={totpEnabled}
+                    onCheckedChange={async (on) => {
+                      try {
+                        if (on) {
+                          const data = await apiFetch<{ secret: string; otpauthUrl: string }>('/auth/totp/setup', { method: 'POST' });
+                          setTotpSecret(data.secret);
+                          setTotpUrl(data.otpauthUrl);
+                          setMessage({ type: 'info', text: 'Scan the otpauth URL, then confirm with a 6-digit code' });
+                        } else {
+                          await apiFetch('/auth/totp/disable', { method: 'POST', body: JSON.stringify({ password: totpPassword }) });
+                          setTotpEnabled(false);
+                          setTotpSecret('');
+                          setTotpUrl('');
+                          setMessage({ type: 'success', text: 'TOTP disabled' });
+                        }
+                      } catch (error) {
+                        setMessage({ type: 'error', text: error instanceof Error ? error.message : 'TOTP update failed' });
+                      }
+                    }}
+                  />
                 </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold">Session Timeout</h3>
-                    <p className="text-sm text-muted-foreground">Automatically log out inactive users</p>
-                  </div>
-                  <Select defaultValue="8h">
-                    <SelectTrigger className="w-32">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="1h">1 hour</SelectItem>
-                      <SelectItem value="4h">4 hours</SelectItem>
-                      <SelectItem value="8h">8 hours</SelectItem>
-                      <SelectItem value="24h">24 hours</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold">Audit Logging</h3>
-                    <p className="text-sm text-muted-foreground">Log all user actions for compliance</p>
-                  </div>
-                  <Switch defaultChecked />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-lg font-semibold">IP Whitelist</h3>
-                    <p className="text-sm text-muted-foreground">Restrict access to specific IP addresses</p>
-                  </div>
-                  <Switch />
-                </div>
-              </div>
-
-              <Separator />
-
-              <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Data Encryption</h3>
-                <div className="grid grid-cols-2 gap-4">
+                {!totpEnabled && totpSecret && (
                   <div className="space-y-2">
-                    <Label>Encryption Algorithm</Label>
-                    <Select defaultValue="aes-256">
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="aes-128">AES-128</SelectItem>
-                        <SelectItem value="aes-256">AES-256</SelectItem>
-                        <SelectItem value="chacha20">ChaCha20</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <Label>Secret</Label>
+                    <Input value={totpSecret} readOnly />
+                    <Label>otpauth URL</Label>
+                    <Input value={totpUrl} readOnly />
+                    <Label>Confirmation code</Label>
+                    <Input
+                      value={totpCode}
+                      onChange={(e) => setTotpCode(e.target.value)}
+                      placeholder="6-digit code"
+                    />
+                    <Button
+                      onClick={async () => {
+                        try {
+                          await apiFetch('/auth/totp/enable', { method: 'POST', body: JSON.stringify({ code: totpCode }) });
+                          setTotpEnabled(true);
+                          setTotpSecret('');
+                          setTotpCode('');
+                          setMessage({ type: 'success', text: 'TOTP enabled' });
+                        } catch (error) {
+                          setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Invalid TOTP code' });
+                        }
+                      }}
+                    >
+                      Confirm 2FA
+                    </Button>
                   </div>
+                )}
+                {totpEnabled && (
                   <div className="space-y-2">
-                    <Label>Key Rotation</Label>
-                    <Select defaultValue="90d">
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="30d">30 days</SelectItem>
-                        <SelectItem value="90d">90 days</SelectItem>
-                        <SelectItem value="180d">180 days</SelectItem>
-                        <SelectItem value="365d">1 year</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <Label>Current password (required to disable 2FA)</Label>
+                    <Input
+                      type="password"
+                      value={totpPassword}
+                      onChange={(e) => setTotpPassword(e.target.value)}
+                    />
                   </div>
-                </div>
+                )}
               </div>
             </CardContent>
           </Card>
